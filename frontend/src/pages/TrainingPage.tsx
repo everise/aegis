@@ -2,83 +2,99 @@
  * Training page for RL training management.
  */
 
-import { useEffect, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { clsx } from 'clsx';
-import { trainingApi } from '@/services/api';
-import type { TrainingJob, TrainingStatus } from '@/types';
+import { useNavigate } from "react-router-dom";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Play, Square, Plus, Activity } from "lucide-react";
+import { trainingApi } from "@/services/api";
+import type { TrainingJob } from "@/types";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    pending: 'bg-yellow-100 text-yellow-800',
-    running: 'bg-blue-100 text-blue-800',
-    completed: 'bg-green-100 text-green-800',
-    failed: 'bg-red-100 text-red-800',
-    cancelled: 'bg-gray-100 text-gray-800',
-    idle: 'bg-gray-100 text-gray-800',
+  const variants: Record<string, string> = {
+    pending: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300",
+    running: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
+    completed: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
+    failed: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300",
+    cancelled: "bg-muted text-muted-foreground",
+    idle: "bg-muted text-muted-foreground",
   };
 
   return (
-    <span className={clsx('px-2 py-1 rounded text-xs font-medium capitalize', colors[status] || colors.idle)}>
+    <span
+      className={cn(
+        "px-2 py-1 rounded-md text-xs font-medium capitalize",
+        variants[status] || variants.idle
+      )}
+    >
       {status}
     </span>
   );
 }
 
-function JobCard({ job, onStart, onCancel }: { 
-  job: TrainingJob; 
+function JobCard({
+  job,
+  onStart,
+  onCancel,
+}: {
+  job: TrainingJob;
   onStart: (id: number) => void;
   onCancel: (id: number) => void;
 }) {
-  const progress = job.total_epochs > 0 ? (job.current_epoch / job.total_epochs) * 100 : 0;
+  const progress =
+    job.total_epochs > 0 ? (job.current_epoch / job.total_epochs) * 100 : 0;
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="rounded-lg border bg-card p-4 shadow-sm">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-semibold">Job #{job.id}</h3>
         <StatusBadge status={job.status} />
       </div>
 
-      <div className="space-y-2 text-sm text-gray-600">
+      <div className="space-y-2 text-sm text-muted-foreground">
         <div className="flex justify-between">
           <span>Policy Version:</span>
-          <span className="font-mono">{job.policy_version || 'N/A'}</span>
+          <span className="font-mono text-foreground">
+            {job.policy_version || "N/A"}
+          </span>
         </div>
         <div className="flex justify-between">
           <span>Progress:</span>
-          <span>{job.current_epoch} / {job.total_epochs} epochs</span>
+          <span className="text-foreground">
+            {job.current_epoch} / {job.total_epochs} epochs
+          </span>
         </div>
       </div>
 
       {/* Progress bar */}
-      <div className="mt-3 h-2 bg-gray-200 rounded-full overflow-hidden">
-        <div 
-          className="h-full bg-primary-500 transition-all duration-300"
+      <div className="mt-3 h-2 bg-muted rounded-full overflow-hidden">
+        <div
+          className="h-full bg-primary transition-all duration-300"
           style={{ width: `${progress}%` }}
         />
       </div>
 
       {/* Actions */}
       <div className="mt-4 flex gap-2">
-        {job.status === 'pending' && (
-          <button
-            onClick={() => onStart(job.id)}
-            className="px-3 py-1 bg-primary-500 text-white rounded text-sm hover:bg-primary-600"
-          >
+        {job.status === "pending" && (
+          <Button size="sm" onClick={() => onStart(job.id)}>
+            <Play className="h-3 w-3 mr-1" />
             Start
-          </button>
+          </Button>
         )}
-        {job.status === 'running' && (
-          <button
+        {job.status === "running" && (
+          <Button
+            size="sm"
+            variant="destructive"
             onClick={() => onCancel(job.id)}
-            className="px-3 py-1 bg-red-500 text-white rounded text-sm hover:bg-red-600"
           >
+            <Square className="h-3 w-3 mr-1" />
             Cancel
-          </button>
+          </Button>
         )}
       </div>
 
-      <div className="mt-3 text-xs text-gray-400">
+      <div className="mt-3 text-xs text-muted-foreground">
         Created: {new Date(job.created_at).toLocaleString()}
       </div>
     </div>
@@ -86,24 +102,25 @@ function JobCard({ job, onStart, onCancel }: {
 }
 
 export default function TrainingPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   // Fetch training status
   const { data: status } = useQuery({
-    queryKey: ['trainingStatus'],
+    queryKey: ["trainingStatus"],
     queryFn: trainingApi.getStatus,
     refetchInterval: 5000,
   });
 
   // Fetch jobs
   const { data: jobs, isLoading: jobsLoading } = useQuery({
-    queryKey: ['trainingJobs'],
+    queryKey: ["trainingJobs"],
     queryFn: () => trainingApi.listJobs(20),
   });
 
   // Fetch buffer stats
   const { data: bufferStats } = useQuery({
-    queryKey: ['bufferStats'],
+    queryKey: ["bufferStats"],
     queryFn: trainingApi.getBufferStats,
     refetchInterval: 10000,
   });
@@ -111,65 +128,82 @@ export default function TrainingPage() {
   // Mutations
   const createJobMutation = useMutation({
     mutationFn: () => trainingApi.createJob(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['trainingJobs'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["trainingJobs"] }),
   });
 
   const startJobMutation = useMutation({
     mutationFn: trainingApi.startJob,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['trainingJobs'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["trainingJobs"] }),
   });
 
   const cancelJobMutation = useMutation({
     mutationFn: trainingApi.cancelJob,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['trainingJobs'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["trainingJobs"] }),
   });
 
   return (
-    <div className="h-full overflow-auto">
+    <div className="h-screen bg-background overflow-auto">
       <div className="max-w-6xl mx-auto p-6">
-        <h1 className="text-2xl font-bold text-gray-900 mb-6">RL Training</h1>
+        {/* Header */}
+        <div className="flex items-center gap-4 mb-6">
+          <Button variant="ghost" size="icon" onClick={() => navigate("/chat")}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold">RL Training</h1>
+            <p className="text-sm text-muted-foreground">
+              Manage reinforcement learning training jobs
+            </p>
+          </div>
+        </div>
 
         {/* Status Overview */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <p className="text-sm text-gray-500">Trainer Status</p>
+          <div className="rounded-lg border bg-card p-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground mb-1">
+              <Activity className="h-4 w-4" />
+              Trainer Status
+            </div>
             <div className="mt-1">
-              <StatusBadge status={status?.status || 'idle'} />
+              <StatusBadge status={status?.status || "idle"} />
             </div>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <p className="text-sm text-gray-500">Current Epoch</p>
-            <p className="text-2xl font-bold text-gray-900">{status?.current_epoch || 0}</p>
+          <div className="rounded-lg border bg-card p-4">
+            <p className="text-sm text-muted-foreground">Current Epoch</p>
+            <p className="text-2xl font-bold">{status?.current_epoch || 0}</p>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <p className="text-sm text-gray-500">Buffer Size</p>
-            <p className="text-2xl font-bold text-gray-900">{status?.buffer_size || 0}</p>
+          <div className="rounded-lg border bg-card p-4">
+            <p className="text-sm text-muted-foreground">Buffer Size</p>
+            <p className="text-2xl font-bold">{status?.buffer_size || 0}</p>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <p className="text-sm text-gray-500">Best Return</p>
-            <p className="text-2xl font-bold text-gray-900">
-              {status?.best_return?.toFixed(2) || 'N/A'}
+          <div className="rounded-lg border bg-card p-4">
+            <p className="text-sm text-muted-foreground">Best Return</p>
+            <p className="text-2xl font-bold">
+              {status?.best_return?.toFixed(2) || "N/A"}
             </p>
           </div>
         </div>
 
         {/* Create Job Button */}
         <div className="mb-6">
-          <button
+          <Button
             onClick={() => createJobMutation.mutate()}
             disabled={createJobMutation.isPending}
-            className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:bg-gray-300"
           >
-            {createJobMutation.isPending ? 'Creating...' : '+ Create Training Job'}
-          </button>
+            <Plus className="h-4 w-4 mr-2" />
+            {createJobMutation.isPending ? "Creating..." : "Create Training Job"}
+          </Button>
         </div>
 
         {/* Jobs List */}
         <div className="mb-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Training Jobs</h2>
-          
+          <h2 className="text-lg font-semibold mb-4">Training Jobs</h2>
+
           {jobsLoading ? (
-            <p className="text-gray-500">Loading jobs...</p>
+            <p className="text-muted-foreground">Loading jobs...</p>
           ) : jobs && jobs.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {jobs.map((job) => (
@@ -182,16 +216,16 @@ export default function TrainingPage() {
               ))}
             </div>
           ) : (
-            <p className="text-gray-500">No training jobs yet</p>
+            <p className="text-muted-foreground">No training jobs yet</p>
           )}
         </div>
 
         {/* Buffer Stats */}
         {bufferStats && (
           <div>
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Buffer Statistics</h2>
-            <div className="bg-white rounded-lg border border-gray-200 p-4">
-              <pre className="text-sm text-gray-700 overflow-auto">
+            <h2 className="text-lg font-semibold mb-4">Buffer Statistics</h2>
+            <div className="rounded-lg border bg-card p-4">
+              <pre className="text-sm overflow-auto">
                 {JSON.stringify(bufferStats, null, 2)}
               </pre>
             </div>
