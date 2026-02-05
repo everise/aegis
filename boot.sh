@@ -112,11 +112,32 @@ done
 
 # 检查 Python
 check_python() {
-    if ! command -v python &> /dev/null; then
+    # 尝试激活conda环境
+    if [ -f "$HOME/miniconda3/bin/activate" ]; then
+        source "$HOME/miniconda3/bin/activate"
+        if conda activate aegis 2>/dev/null; then
+            PYTHON_CMD=python
+            PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | awk '{print $2}')
+            print_info "Python: $PYTHON_VERSION (conda env: aegis)"
+            return
+        fi
+    fi
+    
+    # 如果没有conda，尝试 python3，然后是 python
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD=python3
+    elif command -v python &> /dev/null; then
+        PYTHON_CMD=python
+    else
         print_error "Python not found. Please install Python 3.12+"
+        print_error "Option 1: conda create -n aegis python=3.12"
+        print_error "Option 2: sudo apt install python3 python3-pip python3-venv"
         exit 1
     fi
-    print_info "Python: $(python --version)"
+    
+    # 检查 Python 版本
+    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | awk '{print $2}')
+    print_info "Python: $PYTHON_VERSION (using $PYTHON_CMD)"
 }
 
 # 检查 Node.js
@@ -131,16 +152,36 @@ check_node() {
 
 # 设置 Python 虚拟环境
 setup_venv() {
+    # 如果已经在conda环境中，跳过venv设置
+    if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" = "aegis" ]; then
+        print_info "Using conda environment: aegis"
+        return
+    fi
+    
     if [ -z "$VIRTUAL_ENV" ]; then
         if [ -d "venv" ]; then
             print_info "Activating virtual environment..."
-            source venv/bin/activate 2>/dev/null || source venv/Scripts/activate 2>/dev/null || true
+            source venv/bin/activate 2>/dev/null || source venv/Scripts/activate 2>/dev/null || {
+                print_warn "Failed to activate venv. Using system Python."
+            }
         elif [ -d "backend/venv" ]; then
             print_info "Activating virtual environment..."
-            source backend/venv/bin/activate 2>/dev/null || source backend/venv/Scripts/activate 2>/dev/null || true
+            source backend/venv/bin/activate 2>/dev/null || source backend/venv/Scripts/activate 2>/dev/null || {
+                print_warn "Failed to activate venv. Using system Python."
+            }
         else
-            print_warn "No virtual environment found. Using system Python."
+            print_warn "No virtual environment found."
+            print_info "Creating virtual environment..."
+            $PYTHON_CMD -m venv venv || {
+                print_error "Failed to create virtual environment."
+                print_error "Please install: sudo apt install python3-venv"
+                exit 1
+            }
+            source venv/bin/activate
+            print_info "Virtual environment created and activated."
         fi
+    else
+        print_info "Already in virtual environment: $VIRTUAL_ENV"
     fi
 }
 
@@ -148,11 +189,26 @@ setup_venv() {
 install_backend_deps() {
     print_info "Checking backend dependencies..."
     
+    # 确保 pip 可用
+    if ! command -v pip &> /dev/null; then
+        print_info "Installing pip..."
+        $PYTHON_CMD -m ensurepip --upgrade 2>/dev/null || {
+            print_error "pip not found. Please install: sudo apt install python3-pip"
+            exit 1
+        }
+    fi
+    
     if [ -f "backend/requirements.txt" ]; then
+        # 先升级 pip
+        pip install --upgrade pip -q 2>/dev/null || true
+        
+        # 安装依赖
         pip install -q -r backend/requirements.txt 2>/dev/null || {
             print_warn "Some dependencies may be missing. Installing..."
             pip install -r backend/requirements.txt
         }
+    else
+        print_warn "requirements.txt not found at backend/requirements.txt"
     fi
 }
 
@@ -209,9 +265,9 @@ start_server() {
     
     if [ "$DEV_MODE" = true ]; then
         print_info "Starting in development mode with auto-reload..."
-        python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload
+        $PYTHON_CMD -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload
     else
-        python -m uvicorn app.main:app --host "$HOST" --port "$PORT"
+        $PYTHON_CMD -m uvicorn app.main:app --host "$HOST" --port "$PORT"
     fi
 }
 
@@ -228,8 +284,8 @@ main() {
     print_header
     
     check_python
-    check_node
     setup_venv
+    check_node
     install_backend_deps
     setup_directories
     build_frontend

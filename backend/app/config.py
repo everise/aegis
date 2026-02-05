@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     
     # Skill settings
     skills_dir: str = Field(
-        default="app/skills",
+        default="skills",
         description="Directory containing skill definitions"
     )
     

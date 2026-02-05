@@ -6,7 +6,7 @@ Defines various reward signals for image generation tasks.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 
 
@@ -215,7 +215,7 @@ class CompositeReward(RewardFunction):
     
     def __init__(
         self,
-        reward_functions: List[tuple[RewardFunction, float]] = None,
+        reward_functions: List[Tuple[RewardFunction, float]] = None,
     ):
         """
         Initialize with list of (reward_function, weight) tuples.
@@ -274,7 +274,7 @@ class RewardNormalizer:
     
     def __init__(
         self,
-        clip_range: tuple[float, float] = (-10.0, 10.0),
+        clip_range: Tuple[float, float] = (-10.0, 10.0),
         epsilon: float = 1e-8,
     ):
         self.clip_range = clip_range
