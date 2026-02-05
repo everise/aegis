@@ -19,7 +19,7 @@ from app.config import get_settings
 from app.database import init_db, close_db
 
 # Frontend build directory (relative to project root)
-FRONTEND_DIST_DIR = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
+FRONTEND_DIST_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
 
 @asynccontextmanager

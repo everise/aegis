@@ -8,7 +8,7 @@ sending messages and triggering agent planning.
 from datetime import datetime
 from typing import List, Optional, AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from app.database import (
     MessageRole,
     SessionStatus,
     get_db_session,
+    get_db_session_context,
 )
 from app.services.react_planner import ReActPlanner
 from app.services.sse_manager import (
@@ -270,12 +271,17 @@ async def chat_stream(
     session_id: int,
     message: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db_session),
+    background_tasks: BackgroundTasks = None,
 ):
     """
     Stream chat response via Server-Sent Events.
     
     Returns a stream of planning events for real-time UI updates.
+    Messages are saved to database for persistence.
     """
+    import json
+    from starlette.background import BackgroundTasks as BT
+    
     # Verify session
     session_query = select(DBSession).where(DBSession.id == session_id)
     session_result = await db.execute(session_query)
@@ -284,30 +290,83 @@ async def chat_stream(
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     
+    # Save user message to database
+    user_message = DBMessage(
+        session_id=session_id,
+        role=MessageRole.USER,
+        content=message,
+    )
+    db.add(user_message)
+    await db.commit()
+    await db.refresh(user_message)
+    
+    # Shared state for collecting events
+    collected_steps: list = []
+    final_result_holder: dict = {"result": None}
+    stream_completed = {"value": False}
+    
+    async def save_assistant_message():
+        """Save assistant message to database."""
+        # Wait a bit for stream to complete
+        import asyncio
+        await asyncio.sleep(0.5)
+        
+        try:
+            async with get_db_session_context() as save_db:
+                final_result = final_result_holder["result"]
+                assistant_content = ""
+                if final_result:
+                    if isinstance(final_result, dict):
+                        assistant_content = final_result.get("image_url", "") or final_result.get("message", "Task completed")
+                    else:
+                        assistant_content = str(final_result)
+                
+                assistant_message = DBMessage(
+                    session_id=session_id,
+                    role=MessageRole.ASSISTANT,
+                    content=assistant_content or "Task completed",
+                    plan_json={"steps": collected_steps, "final_result": final_result},
+                )
+                save_db.add(assistant_message)
+                await save_db.commit()
+                print(f"Saved assistant message for session {session_id}")
+        except Exception as save_error:
+            print(f"Error saving assistant message: {save_error}")
+    
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events."""
-        # Create SSE connection
-        sse_manager = get_sse_manager()
-        connection = sse_manager.create_connection()
+        nonlocal collected_steps, final_result_holder, stream_completed
+        
+        # Send connected event
+        yield f"data: {json.dumps({'type': 'connected', 'data': {'session_id': session_id}})}\n\n"
         
         # Execute planning with streaming
         planner = ReActPlanner(max_steps=10)
         
         try:
-            # Stream events
-            async for event in connection.event_stream():
-                yield event
+            async for event in planner.execute_stream(message, session_id):
+                yield f"data: {json.dumps(event)}\n\n"
                 
-                # Start planning after connection established
-                if "connected" in event:
-                    # Stream plan execution to connection
-                    await stream_plan_execution(
-                        connection,
-                        planner.execute_stream(message, session_id),
-                    )
-                    await connection.close()
+                # Collect events for saving
+                event_type = event.get("type")
+                if event_type in ("thought", "observation", "finished"):
+                    collected_steps.append(event)
+                
+                # Capture final result for saving
+                if event_type == "finished":
+                    final_result_holder["result"] = event.get("data", {}).get("result", {})
+            
+            # Send completed event
+            yield f"data: {json.dumps({'type': 'completed', 'data': {'message': 'Task completed'}})}\n\n"
+            stream_completed["value"] = True
+                
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'data': {'message': str(e)}})}\n\n"
         finally:
             await planner.close()
+            # Schedule save in background
+            import asyncio
+            asyncio.create_task(save_assistant_message())
     
     return StreamingResponse(
         event_generator(),

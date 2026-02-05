@@ -340,3 +340,91 @@ class SkillExecutor:
         for skill in self._skill_instances.values():
             await skill.close()
         self._skill_instances.clear()
+
+
+class MockSkillExecutor:
+    """
+    Mock skill executor for development and testing.
+    
+    Returns simulated results without making actual API calls.
+    """
+    
+    def __init__(self):
+        self._step_count = 0
+    
+    async def execute(self, skill_name: str, params: Dict[str, Any]) -> SkillResult:
+        """
+        Execute a mock skill.
+        
+        Returns simulated results based on skill type.
+        Includes realistic delays to simulate actual processing time.
+        """
+        import random
+        
+        self._step_count += 1
+        
+        # Simulate realistic processing time (3-6 seconds per skill)
+        await asyncio.sleep(random.uniform(3.0, 6.0))
+        
+        if skill_name == "text_to_image":
+            return SkillResult(
+                skill_name=skill_name,
+                status=SkillStatus.COMPLETED,
+                task_id=f"mock-task-{self._step_count}",
+                result={
+                    "image_url": f"https://picsum.photos/seed/{random.randint(1, 1000)}/512/512",
+                    "width": 512,
+                    "height": 512,
+                    "seed": random.randint(1, 999999),
+                },
+                completed_at=datetime.utcnow(),
+            )
+        
+        elif skill_name == "evaluate_image":
+            # Generate random quality score
+            score = random.uniform(0.6, 0.95)
+            return SkillResult(
+                skill_name=skill_name,
+                status=SkillStatus.COMPLETED,
+                task_id=f"mock-task-{self._step_count}",
+                result={
+                    "scores": {
+                        "quality": score,
+                        "aesthetics": score + random.uniform(-0.1, 0.1),
+                        "prompt_alignment": score + random.uniform(-0.1, 0.1),
+                    },
+                    "overall_score": score,
+                    "feedback": "Image looks good" if score >= 0.7 else "Image needs improvement",
+                },
+                completed_at=datetime.utcnow(),
+            )
+        
+        elif skill_name == "repair_image":
+            return SkillResult(
+                skill_name=skill_name,
+                status=SkillStatus.COMPLETED,
+                task_id=f"mock-task-{self._step_count}",
+                result={
+                    "image_url": f"https://picsum.photos/seed/{random.randint(1, 1000)}/512/512",
+                    "original_url": params.get("image_url"),
+                },
+                completed_at=datetime.utcnow(),
+            )
+        
+        else:
+            return SkillResult(
+                skill_name=skill_name,
+                status=SkillStatus.FAILED,
+                error=f"Unknown skill: {skill_name}",
+            )
+    
+    def list_skills(self) -> list[Dict[str, str]]:
+        """List all available skills."""
+        return [
+            {"name": name, "description": cls.description}
+            for name, cls in SKILL_REGISTRY.items()
+        ]
+    
+    async def close(self):
+        """No resources to close."""
+        pass

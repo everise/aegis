@@ -4,6 +4,7 @@ Database models and session management for Aegis.
 Uses SQLAlchemy async with aiosqlite for SQLite database operations.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 from enum import Enum as PyEnum
@@ -263,6 +264,25 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+@asynccontextmanager
+async def get_db_session_context() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Context manager for getting a database session.
+    
+    Usage in async generators or other contexts:
+        async with get_db_session_context() as db:
+            db.add(model)
+            await db.commit()
+    """
+    session_factory = get_async_session_factory()
+    async with session_factory() as session:
+        try:
+            yield session
         except Exception:
             await session.rollback()
             raise

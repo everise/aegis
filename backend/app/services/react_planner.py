@@ -5,13 +5,14 @@ Implements the Thought -> Action -> Observation cycle for
 iterative task completion with skill execution.
 """
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncIterator
 from enum import Enum
 
-from app.services.skill_executor import SkillExecutor, SkillResult, SkillStatus
+from app.services.skill_executor import SkillExecutor, MockSkillExecutor, SkillResult, SkillStatus
 from app.services.llm_simulator import (
     LLMSimulator,
     MockLLMClient,
@@ -100,10 +101,18 @@ class ReActPlanner:
         skill_executor: Optional[SkillExecutor] = None,
         llm_client: Optional[MockLLMClient] = None,
         max_steps: int = 10,
+        use_mock: bool = True,
     ):
-        self.skill_executor = skill_executor or SkillExecutor()
+        # Use mock executor by default for development
+        if use_mock and skill_executor is None:
+            self.skill_executor = MockSkillExecutor()
+        elif skill_executor is not None:
+            self.skill_executor = skill_executor
+        else:
+            self.skill_executor = SkillExecutor()
         self.llm_client = llm_client or MockLLMClient()
         self.max_steps = max_steps
+        print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
     
     async def _get_next_step(
         self,
@@ -262,6 +271,8 @@ class ReActPlanner:
         Yields status updates for each step of the planning process.
         Used for real-time UI updates via SSE.
         """
+        import random
+        
         plan = ExecutionPlan(
             session_id=session_id,
             user_message=user_message,
@@ -275,17 +286,23 @@ class ReActPlanner:
             "data": {"user_message": user_message, "session_id": session_id},
         }
         
+        # Initial delay to simulate receiving and processing request
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        
         observation: Optional[Dict[str, Any]] = None
         step_number = 0
         
         while step_number < self.max_steps:
             step_number += 1
             
-            # Thinking phase
+            # Thinking phase - simulate LLM thinking time
             yield {
                 "type": "thinking",
                 "data": {"step_number": step_number},
             }
+            
+            # Simulate thinking delay (3-5 seconds)
+            await asyncio.sleep(random.uniform(3.0, 5.0))
             
             try:
                 react_step = await self._get_next_step(user_message, observation)
@@ -295,6 +312,9 @@ class ReActPlanner:
                     "data": {"step_number": step_number, "error": str(e)},
                 }
                 break
+            
+            # Small delay before showing thought result
+            await asyncio.sleep(random.uniform(0.5, 1.0))
             
             yield {
                 "type": "thought",
@@ -308,13 +328,16 @@ class ReActPlanner:
             
             # Check finish
             if react_step.action == ActionType.FINISH:
+                await asyncio.sleep(random.uniform(0.5, 1.0))
                 yield {
                     "type": "finished",
                     "data": {"result": react_step.action_input},
                 }
                 break
             
-            # Executing phase
+            # Executing phase - delay before starting execution
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            
             yield {
                 "type": "executing",
                 "data": {
@@ -328,6 +351,9 @@ class ReActPlanner:
                     react_step.action,
                     react_step.action_input,
                 )
+                
+                # Small delay before showing observation
+                await asyncio.sleep(random.uniform(0.3, 0.8))
                 
                 yield {
                     "type": "observation",
