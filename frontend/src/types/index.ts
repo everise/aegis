@@ -135,3 +135,20 @@ export interface SSEEvent {
 export interface ApiError {
   detail: string;
 }
+
+// Prompt types
+export interface Prompt {
+  id: number;
+  name: string;
+  content: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptListResponse {
+  prompts: Prompt[];
+  total: number;
+  page: number;
+  page_size: number;
+}

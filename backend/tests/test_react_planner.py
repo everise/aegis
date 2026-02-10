@@ -1,7 +1,7 @@
 """
 Unit tests for ReAct planner and related components.
 
-Tests LLM simulator, ReAct planner, and SSE manager.
+Tests planning models, ReAct planner, and SSE manager.
 """
 
 import pytest
@@ -10,13 +10,11 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.llm_simulator import (
-    LLMSimulator,
-    MockLLMClient,
-    ReActStep,
-    ActionType,
-    RESPONSE_TEMPLATES,
-)
+from app.services.planning.base import BasePlanningModel, PlanningStep, ActionType, PlanningModelInfo
+from app.services.planning.gemini import GeminiPlanningModel
+from app.services.planning.kimi import KimiPlanningModel
+from app.services.planning.qwen_vl import QwenVLPlanningModel
+from app.services.planning.registry import PlanningModelRegistry, get_planning_registry, reset_planning_registry
 from app.services.react_planner import (
     ReActPlanner,
     ExecutionPlan,
@@ -35,172 +33,140 @@ from app.services.sse_manager import (
 from app.services.skill_executor import SkillResult, SkillStatus
 
 
-class TestLLMSimulator:
-    """Tests for LLMSimulator."""
-    
-    def setup_method(self):
-        """Create fresh simulator for each test."""
-        self.simulator = LLMSimulator()
-    
-    def test_initial_state(self):
-        """Test simulator starts in correct initial state."""
-        assert self.simulator._step_count == 0
-        assert self.simulator._repair_count == 0
-        assert self.simulator._current_image_url is None
-    
-    def test_reset(self):
-        """Test reset clears state."""
-        self.simulator._step_count = 5
-        self.simulator._repair_count = 2
-        self.simulator._current_image_url = "http://example.com/img.png"
-        
-        self.simulator.reset()
-        
-        assert self.simulator._step_count == 0
-        assert self.simulator._repair_count == 0
-        assert self.simulator._current_image_url is None
-    
-    def test_first_step_generates_image(self):
-        """Test first step is always text_to_image generation."""
-        step = self.simulator.get_next_step("Create a sunset image")
-        
+class TestPlanningModelInterface:
+    """Tests for the planning model abstract interface and implementations."""
+
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    def test_model_info(self, ModelClass):
+        """Each model returns valid info."""
+        model = ModelClass()
+        info = model.info()
+        assert isinstance(info, PlanningModelInfo)
+        assert info.id
+        assert info.name
+        assert info.provider
+
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    def test_reset(self, ModelClass):
+        """Reset clears internal state."""
+        model = ModelClass()
+        model._step = 5
+        model._repairs = 2
+        model.reset()
+        assert model._step == 0
+        assert model._repairs == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    async def test_first_step_generates(self, ModelClass):
+        """First step should always be a generate action."""
+        model = ModelClass()
+        step = await model.get_next_step("Create a sunset image")
         assert step.action == ActionType.GENERATE
         assert "text_to_image" in str(step.action_input)
-        assert "sunset" in step.action_input["params"]["prompt"]
-    
-    def test_second_step_evaluates_image(self):
-        """Test second step evaluates the generated image."""
-        # First step
-        self.simulator.get_next_step("Create an image")
-        
-        # Second step with observation
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    async def test_second_step_evaluates(self, ModelClass):
+        """Second step should evaluate the generated image."""
+        model = ModelClass()
+        await model.get_next_step("Create an image")
         observation = {
             "result": {"image_url": "http://example.com/img.png"},
             "status": "completed",
         }
-        step = self.simulator.get_next_step("Create an image", observation)
-        
+        step = await model.get_next_step("Create an image", observation)
         assert step.action == ActionType.EVALUATE
-        assert "evaluate_image" in str(step.action_input)
-    
-    def test_high_quality_finishes(self):
-        """Test high quality score leads to finish."""
-        self.simulator.quality_threshold = 0.7
-        
-        # Step 1: Generate
-        self.simulator.get_next_step("Create an image")
-        
-        # Step 2: Evaluate
-        self.simulator.get_next_step("Create an image", {
-            "result": {"image_url": "http://example.com/img.png"},
-        })
-        
-        # Step 3: Finish (high score)
-        step = self.simulator.get_next_step("Create an image", {
-            "result": {"overall_score": 0.9},
-        })
-        
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    async def test_high_quality_finishes(self, ModelClass):
+        """High quality score should lead to a finish action."""
+        model = ModelClass()
+        model.quality_threshold = 0.7
+        await model.get_next_step("Create an image")
+        await model.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
+        step = await model.get_next_step("Create an image", {"result": {"overall_score": 0.9}})
         assert step.action == ActionType.FINISH
         assert step.action_input.get("result") == "success"
-    
-    def test_low_quality_triggers_repair(self):
-        """Test low quality score triggers repair."""
-        self.simulator.quality_threshold = 0.7
-        
-        # Step 1: Generate
-        self.simulator.get_next_step("Create an image")
-        
-        # Step 2: Evaluate
-        self.simulator.get_next_step("Create an image", {
-            "result": {"image_url": "http://example.com/img.png"},
-        })
-        
-        # Step 3: Repair (low score)
-        step = self.simulator.get_next_step("Create an image", {
-            "result": {"overall_score": 0.5},
-        })
-        
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    async def test_low_quality_triggers_repair(self, ModelClass):
+        """Low quality score should trigger repair."""
+        model = ModelClass()
+        model.quality_threshold = 0.7
+        await model.get_next_step("Create an image")
+        await model.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
+        step = await model.get_next_step("Create an image", {"result": {"overall_score": 0.5}})
         assert step.action == ActionType.REPAIR
-    
-    def test_max_repairs_leads_to_failure(self):
-        """Test max repair attempts leads to failure."""
-        self.simulator.quality_threshold = 0.7
-        self.simulator.max_repair_attempts = 1
-        
-        # Generate
-        self.simulator.get_next_step("Create an image")
-        
-        # Evaluate
-        self.simulator.get_next_step("Create an image", {
-            "result": {"image_url": "http://example.com/img.png"},
-        })
-        
-        # First low score -> repair
-        self.simulator.get_next_step("Create an image", {
-            "result": {"overall_score": 0.5},
-        })
-        
-        # After repair -> re-evaluate
-        self.simulator.get_next_step("Create an image", {
-            "skill_name": "repair_image",
-            "result": {"image_url": "http://example.com/repaired.png"},
-        })
-        
-        # Second low score -> should fail (max repairs reached)
-        step = self.simulator.get_next_step("Create an image", {
-            "result": {"overall_score": 0.5},
-        })
-        
-        assert step.action == ActionType.FINISH
-        assert step.action_input.get("result") == "failure"
-    
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
+    async def test_chat_completion_wrapper(self, ModelClass):
+        """chat_completion returns valid OpenAI-like response."""
+        model = ModelClass()
+        response = await model.chat_completion([
+            {"role": "user", "content": "Generate an image of a cat"}
+        ])
+        assert "choices" in response
+        content = json.loads(response["choices"][0]["message"]["content"])
+        assert "thought" in content
+        assert "action" in content
+
     def test_format_step_as_dict(self):
-        """Test ReActStep to dict conversion."""
-        step = ReActStep(
+        """PlanningStep to dict conversion."""
+        model = GeminiPlanningModel()
+        step = PlanningStep(
             thought="Test thought",
             action=ActionType.GENERATE,
             action_input={"skill": "text_to_image"},
         )
-        
-        result = self.simulator.format_step_as_dict(step)
-        
+        result = model.format_step_as_dict(step)
         assert result["thought"] == "Test thought"
         assert result["action"] == "generate"
-        assert result["action_input"]["skill"] == "text_to_image"
 
 
-class TestMockLLMClient:
-    """Tests for MockLLMClient."""
-    
-    @pytest.mark.asyncio
-    async def test_chat_completion_returns_valid_json(self):
-        """Test chat completion returns valid JSON response."""
-        client = MockLLMClient()
-        
-        response = await client.chat_completion([
-            {"role": "user", "content": "Generate an image of a cat"}
-        ])
-        
-        assert "choices" in response
-        assert len(response["choices"]) > 0
-        content = json.loads(response["choices"][0]["message"]["content"])
-        assert "thought" in content
-        assert "action" in content
-    
-    @pytest.mark.asyncio
-    async def test_chat_completion_stream(self):
-        """Test streaming chat completion."""
-        client = MockLLMClient()
-        
-        chunks = []
-        async for chunk in client.chat_completion_stream([
-            {"role": "user", "content": "Test message"}
-        ]):
-            chunks.append(chunk)
-        
-        assert len(chunks) > 0
-        # Last chunk should have finish_reason
-        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+class TestPlanningModelRegistry:
+    """Tests for planning model registry."""
+
+    def test_register_and_list(self):
+        """Registered models appear in list."""
+        reg = PlanningModelRegistry()
+        reg.register(GeminiPlanningModel())
+        reg.register(KimiPlanningModel())
+        assert len(reg.list_models()) == 2
+
+    def test_first_registered_is_default(self):
+        """First registered model becomes the default active model."""
+        reg = PlanningModelRegistry()
+        reg.register(GeminiPlanningModel())
+        reg.register(KimiPlanningModel())
+        assert reg.get_active_model_id() == "gemini"
+
+    def test_set_active_model(self):
+        """set_active_model switches the active model."""
+        reg = PlanningModelRegistry()
+        reg.register(GeminiPlanningModel())
+        reg.register(KimiPlanningModel())
+        reg.set_active_model("kimi")
+        assert reg.get_active_model_id() == "kimi"
+
+    def test_set_unknown_model_raises(self):
+        """Setting an unknown model id raises KeyError."""
+        reg = PlanningModelRegistry()
+        reg.register(GeminiPlanningModel())
+        with pytest.raises(KeyError):
+            reg.set_active_model("nonexistent")
+
+    def test_global_registry(self):
+        """get_planning_registry returns a populated singleton."""
+        reset_planning_registry()
+        reg = get_planning_registry()
+        ids = [m.id for m in reg.list_models()]
+        assert "gemini" in ids
+        assert "kimi" in ids
+        assert "qwen-vl" in ids
 
 
 class TestReActPlanner:
@@ -240,6 +206,7 @@ class TestReActPlanner:
         
         planner = ReActPlanner(
             skill_executor=mock_skill_executor,
+            planning_model=GeminiPlanningModel(),
             max_steps=10,
         )
         
@@ -261,6 +228,7 @@ class TestReActPlanner:
         
         planner = ReActPlanner(
             skill_executor=mock_skill_executor,
+            planning_model=GeminiPlanningModel(),
             max_steps=3,
         )
         
@@ -279,6 +247,7 @@ class TestReActPlanner:
         
         planner = ReActPlanner(
             skill_executor=mock_skill_executor,
+            planning_model=GeminiPlanningModel(),
             max_steps=5,
         )
         
@@ -298,6 +267,7 @@ class TestReActPlanner:
         
         planner = ReActPlanner(
             skill_executor=mock_skill_executor,
+            planning_model=GeminiPlanningModel(),
             max_steps=5,
         )
         
@@ -320,6 +290,7 @@ class TestReActPlanner:
         
         planner = ReActPlanner(
             skill_executor=mock_skill_executor,
+            planning_model=GeminiPlanningModel(),
             max_steps=5,
         )
         

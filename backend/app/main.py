@@ -78,6 +78,9 @@ def create_app() -> FastAPI:
 def register_routes(app: FastAPI) -> None:
     """Register all API routes."""
     from app.api import sessions, messages, skills, training
+    from app.api import planning_models
+    from app.api import prompts
+    from app.api import context
     from app.services.mock_remote import router as mock_router
     
     # Health check endpoint
@@ -91,6 +94,9 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(messages.router, prefix="/api/v1", tags=["messages"])
     app.include_router(skills.router, prefix="/api/v1/skills", tags=["skills"])
     app.include_router(training.router, prefix="/api/v1/training", tags=["training"])
+    app.include_router(planning_models.router, prefix="/api/v1/planning-models", tags=["planning-models"])
+    app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
+    app.include_router(context.router, prefix="/api/v1/context", tags=["context"])
     
     # Mock remote API for development/testing
     app.include_router(mock_router, prefix="/api/v1/tasks", tags=["mock"])

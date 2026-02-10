@@ -13,12 +13,15 @@ from typing import Any, Dict, List, Optional, AsyncIterator
 from enum import Enum
 
 from app.services.skill_executor import SkillExecutor, MockSkillExecutor, SkillResult, SkillStatus
-from app.services.llm_simulator import (
-    LLMSimulator,
-    MockLLMClient,
-    ReActStep,
-    ActionType,
-)
+from app.services.planning.base import BasePlanningModel, ActionType, PlanningStep
+
+
+@dataclass
+class ReActStep:
+    """A single step in the ReAct reasoning process."""
+    thought: str
+    action: ActionType
+    action_input: Dict[str, Any]
 
 
 class PlanStatus(str, Enum):
@@ -99,7 +102,7 @@ class ReActPlanner:
     def __init__(
         self,
         skill_executor: Optional[SkillExecutor] = None,
-        llm_client: Optional[MockLLMClient] = None,
+        planning_model: Optional[BasePlanningModel] = None,
         max_steps: int = 10,
         use_mock: bool = True,
     ):
@@ -110,31 +113,28 @@ class ReActPlanner:
             self.skill_executor = skill_executor
         else:
             self.skill_executor = SkillExecutor()
-        self.llm_client = llm_client or MockLLMClient()
+        
+        self.planning_model = planning_model
         self.max_steps = max_steps
-        print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
+        if planning_model:
+            print(f"[DEBUG] ReActPlanner initialized with planning_model: {planning_model.info().name}")
+        else:
+            print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
     
     async def _get_next_step(
         self,
         user_message: str,
         observation: Optional[Dict[str, Any]] = None,
     ) -> ReActStep:
-        """Get the next reasoning step from LLM."""
-        messages = [{"role": "user", "content": user_message}]
-        
-        if observation:
-            messages.append({
-                "role": "system",
-                "content": f"Observation: {json.dumps(observation)}",
-            })
-        
-        response = await self.llm_client.chat_completion(messages)
-        content = json.loads(response["choices"][0]["message"]["content"])
-        
+        """Get the next reasoning step from the planning model."""
+        if self.planning_model is None:
+            raise RuntimeError("No planning model configured for ReActPlanner")
+
+        step = await self.planning_model.get_next_step(user_message, observation)
         return ReActStep(
-            thought=content["thought"],
-            action=ActionType(content["action"]),
-            action_input=content["action_input"],
+            thought=step.thought,
+            action=ActionType(step.action.value),
+            action_input=step.action_input,
         )
     
     async def _execute_action(
@@ -181,9 +181,9 @@ class ReActPlanner:
             user_message=user_message,
         )
         
-        # Reset LLM simulator state for new conversation
-        if hasattr(self.llm_client, 'simulator'):
-            self.llm_client.simulator.reset()
+        # Reset planning model state for new conversation
+        if self.planning_model is not None:
+            self.planning_model.reset()
         
         observation: Optional[Dict[str, Any]] = None
         step_number = 0
@@ -191,7 +191,7 @@ class ReActPlanner:
         while step_number < self.max_steps:
             step_number += 1
             
-            # Think: Get next step from LLM
+            # Think: Get next step from planning model
             try:
                 react_step = await self._get_next_step(user_message, observation)
             except Exception as e:
@@ -278,8 +278,8 @@ class ReActPlanner:
             user_message=user_message,
         )
         
-        if hasattr(self.llm_client, 'simulator'):
-            self.llm_client.simulator.reset()
+        if self.planning_model is not None:
+            self.planning_model.reset()
         
         yield {
             "type": "plan_started",

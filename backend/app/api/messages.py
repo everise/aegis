@@ -24,11 +24,13 @@ from app.database import (
     get_db_session_context,
 )
 from app.services.react_planner import ReActPlanner
+from app.services.planning.registry import get_planning_registry
 from app.services.sse_manager import (
     SSEConnection,
     get_sse_manager,
     stream_plan_execution,
 )
+from app.services.vector_context import get_vector_context_manager
 
 
 router = APIRouter()
@@ -106,6 +108,20 @@ async def create_message(
     db.add(message)
     await db.flush()
     await db.refresh(message)
+    
+    # Store message in vector context DB
+    try:
+        vcm = get_vector_context_manager()
+        vcm.add_message(
+            session_id=session_id,
+            message_id=message.id,
+            role=message.role.value,
+            content=message.content,
+            timestamp=message.created_at.isoformat() if message.created_at else None,
+        )
+    except Exception as e:
+        # Non-critical: log but don't fail the request
+        print(f"Warning: Failed to store message in vector context: {e}")
     
     return MessageResponse(
         id=message.id,
@@ -236,8 +252,23 @@ async def chat(
     db.add(user_message)
     await db.flush()
     
-    # Execute ReAct planning
-    planner = ReActPlanner(max_steps=10)
+    # Store user message in vector context DB
+    try:
+        vcm = get_vector_context_manager()
+        vcm.add_message(
+            session_id=session_id,
+            message_id=user_message.id,
+            role="user",
+            content=request.content,
+        )
+    except Exception as e:
+        print(f"Warning: Failed to store message in vector context: {e}")
+    
+    # Execute ReAct planning — use the active planning model
+    registry = get_planning_registry()
+    active_model = registry.get_active_model()
+    active_model.reset()
+    planner = ReActPlanner(planning_model=active_model, max_steps=10)
     plan = await planner.execute(request.content, session_id=session_id)
     await planner.close()
     
@@ -258,6 +289,18 @@ async def chat(
     db.add(assistant_message)
     await db.flush()
     await db.refresh(assistant_message)
+    
+    # Store assistant message in vector context DB
+    try:
+        vcm = get_vector_context_manager()
+        vcm.add_message(
+            session_id=session_id,
+            message_id=assistant_message.id,
+            role="assistant",
+            content=assistant_content or "Task completed",
+        )
+    except Exception as e:
+        print(f"Warning: Failed to store message in vector context: {e}")
     
     return PlanResponse(
         message_id=assistant_message.id,
@@ -300,6 +343,18 @@ async def chat_stream(
     await db.commit()
     await db.refresh(user_message)
     
+    # Store user message in vector context DB
+    try:
+        vcm = get_vector_context_manager()
+        vcm.add_message(
+            session_id=session_id,
+            message_id=user_message.id,
+            role="user",
+            content=message,
+        )
+    except Exception as e:
+        print(f"Warning: Failed to store message in vector context: {e}")
+    
     # Shared state for collecting events
     collected_steps: list = []
     final_result_holder: dict = {"result": None}
@@ -329,6 +384,20 @@ async def chat_stream(
                 )
                 save_db.add(assistant_message)
                 await save_db.commit()
+                await save_db.refresh(assistant_message)
+                
+                # Store assistant message in vector context DB
+                try:
+                    vcm = get_vector_context_manager()
+                    vcm.add_message(
+                        session_id=session_id,
+                        message_id=assistant_message.id,
+                        role="assistant",
+                        content=assistant_content or "Task completed",
+                    )
+                except Exception as vc_error:
+                    print(f"Warning: Failed to store assistant message in vector context: {vc_error}")
+                
                 print(f"Saved assistant message for session {session_id}")
         except Exception as save_error:
             print(f"Error saving assistant message: {save_error}")
@@ -340,8 +409,11 @@ async def chat_stream(
         # Send connected event
         yield f"data: {json.dumps({'type': 'connected', 'data': {'session_id': session_id}})}\n\n"
         
-        # Execute planning with streaming
-        planner = ReActPlanner(max_steps=10)
+        # Execute planning with streaming — use active planning model
+        registry = get_planning_registry()
+        active_model = registry.get_active_model()
+        active_model.reset()
+        planner = ReActPlanner(planning_model=active_model, max_steps=10)
         
         try:
             async for event in planner.execute_stream(message, session_id):

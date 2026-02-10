@@ -48,7 +48,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { BranchContext } from "@/pages/ChatPage";
+import { SessionIdContext } from "@/pages/ChatPage";
 import { subscribeToBranchState, getBranchStateVersion } from "@/hooks/useAegisRuntime";
+import ContextCounter from "@/components/assistant-ui/context-counter";
 
 // Suggestion prompts for empty state - 2 shown side by side
 const SUGGESTIONS = [
@@ -476,6 +478,7 @@ const ThreadWelcome: FC = () => {
 
 const Composer: FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sessionId = useContext(SessionIdContext);
 
   const handleAttachClick = () => {
     fileInputRef.current?.click();
@@ -525,33 +528,39 @@ const Composer: FC = () => {
           <TooltipContent>Attach file</TooltipContent>
         </Tooltip>
 
-        {/* Right side - send/stop button */}
-        <ThreadPrimitive.If running={false}>
-          <ComposerPrimitive.Send asChild>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-8 rounded-lg transition-opacity"
-            >
-              <ArrowUpIcon className="size-4" />
-              <span className="sr-only">Send message</span>
-            </Button>
-          </ComposerPrimitive.Send>
-        </ThreadPrimitive.If>
-        <ThreadPrimitive.If running>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="relative size-8 rounded-lg transition-opacity"
-            >
-              {/* Spinning ring around stop button */}
-              <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-primary" />
-              <SquareIcon className="size-3 fill-current" />
-              <span className="sr-only">Stop generation</span>
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </ThreadPrimitive.If>
+        {/* Right side - context counter + send/stop button */}
+        <div className="flex items-center gap-1">
+          {/* Context Counter */}
+          <ContextCounter sessionId={sessionId} />
+
+          {/* Send/Stop button */}
+          <ThreadPrimitive.If running={false}>
+            <ComposerPrimitive.Send asChild>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-8 rounded-lg transition-opacity"
+              >
+                <ArrowUpIcon className="size-4" />
+                <span className="sr-only">Send message</span>
+              </Button>
+            </ComposerPrimitive.Send>
+          </ThreadPrimitive.If>
+          <ThreadPrimitive.If running>
+            <ComposerPrimitive.Cancel asChild>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="relative size-8 rounded-lg transition-opacity"
+              >
+                {/* Spinning ring around stop button */}
+                <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-primary" />
+                <SquareIcon className="size-3 fill-current" />
+                <span className="sr-only">Stop generation</span>
+              </Button>
+            </ComposerPrimitive.Cancel>
+          </ThreadPrimitive.If>
+        </div>
       </div>
     </ComposerPrimitive.Root>
   );
@@ -564,7 +573,6 @@ const UserMessage: FC = () => {
       <div className="bg-muted text-foreground col-start-2 row-start-1 max-w-xl break-words rounded-3xl px-5 py-2.5">
         <MessagePrimitive.Content />
       </div>
-      <BranchPicker className="col-span-full col-start-1 row-start-2 -mr-1 justify-end" />
     </MessagePrimitive.Root>
   );
 };

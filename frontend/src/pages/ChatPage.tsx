@@ -6,10 +6,10 @@
 import { useState, useCallback, useRef, useSyncExternalStore, createContext } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
-import { Plus, PanelLeft, Settings, MoreHorizontal, Archive, Trash2 } from "lucide-react";
+import { Plus, PanelLeft, Settings, MoreHorizontal, Archive, Trash2, GraduationCap } from "lucide-react";
 
 import { Thread } from "@/components/assistant-ui/thread";
-import { AgentSelector } from "@/components/assistant-ui/agent-selector";
+import { PlanningModelSelector } from "@/components/assistant-ui/planning-model-selector";
 import { useAegisRuntime, subscribeToRunningState, isSessionRunning, subscribeToBranchState, getBranchStateVersion, getRunningStateVersion } from "@/hooks/useAegisRuntime";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,11 +41,14 @@ export interface BranchContextType {
 
 export const BranchContext = createContext<BranchContextType | null>(null);
 
+// Session context for passing session ID to child components
+export const SessionIdContext = createContext<number | null>(null);
+
 export default function ChatPage() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState("image-generation");
+  const [selectedModel, setSelectedModel] = useState("gemini");
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
@@ -261,17 +264,28 @@ export default function ChatPage() {
           </div>
 
           {/* Sidebar Footer - always at bottom */}
-          <div className="shrink-0 p-3 mt-auto">
+          <div className="shrink-0 p-3 mt-auto flex gap-1">
             <button
               type="button"
               onClick={() => navigate("/training")}
               className={cn(
-                "flex h-9 w-full items-center gap-2 rounded-lg px-3 text-sm",
+                "flex h-9 flex-1 items-center justify-center gap-2 rounded-lg px-3 text-sm",
+                "transition-colors hover:bg-muted"
+              )}
+            >
+              <GraduationCap className="size-4" />
+              Training
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/settings")}
+              className={cn(
+                "flex h-9 flex-1 items-center justify-center gap-2 rounded-lg px-3 text-sm",
                 "transition-colors hover:bg-muted"
               )}
             >
               <Settings className="size-4" />
-              Training
+              Settings
             </button>
           </div>
         </aside>
@@ -300,10 +314,10 @@ export default function ChatPage() {
               </TooltipContent>
             </Tooltip>
 
-            {/* Agent Selector */}
-            <AgentSelector
-              value={selectedAgent}
-              onValueChange={setSelectedAgent}
+            {/* Planning Model Selector */}
+            <PlanningModelSelector
+              value={selectedModel}
+              onValueChange={setSelectedModel}
             />
           </header>
 
@@ -311,7 +325,9 @@ export default function ChatPage() {
           <main className="flex-1 overflow-hidden">
             <AssistantRuntimeProvider key={`${currentSessionId ?? "new"}-${newSessionKey.current}`} runtime={runtime}>
               <BranchContext.Provider value={{ handleSwitchBranch, getBranchInfoForMessage }}>
-                <Thread />
+                <SessionIdContext.Provider value={currentSessionId}>
+                  <Thread />
+                </SessionIdContext.Provider>
               </BranchContext.Provider>
             </AssistantRuntimeProvider>
           </main>

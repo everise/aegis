@@ -14,6 +14,8 @@ import type {
   TrainingJob,
   TrainingStatus,
   TrainingConfig,
+  Prompt,
+  PromptListResponse,
 } from '@/types';
 
 const API_BASE_URL = '/api/v1';
@@ -185,3 +187,106 @@ export const trainingApi = {
 };
 
 export default api;
+
+// Context API
+export interface ContextStatsResponse {
+  session_id: number;
+  total_vectors: number;
+  user_message_count: number;
+  assistant_message_count: number;
+  system_message_count: number;
+  total_tokens_estimate: number;
+  context_window_usage: number;
+  max_context_tokens: number;
+  oldest_message_time: string | null;
+  newest_message_time: string | null;
+  collection_name: string;
+  similar_context_count: number;
+}
+
+export const contextApi = {
+  getStats: async (sessionId: number): Promise<ContextStatsResponse> => {
+    const response = await api.get<ContextStatsResponse>(`/context/${sessionId}/stats`);
+    return response.data;
+  },
+};
+
+// Planning Models API
+export interface PlanningModel {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+  supports_vision: boolean;
+  supports_streaming: boolean;
+}
+
+export interface PlanningModelListResponse {
+  models: PlanningModel[];
+  active_model_id: string | null;
+}
+
+export interface SetActiveModelResponse {
+  active_model_id: string;
+  model: PlanningModel;
+}
+
+export const planningModelsApi = {
+  list: async (): Promise<PlanningModelListResponse> => {
+    const response = await api.get<PlanningModelListResponse>('/planning-models');
+    return response.data;
+  },
+
+  getActive: async (): Promise<PlanningModel> => {
+    const response = await api.get<PlanningModel>('/planning-models/active');
+    return response.data;
+  },
+
+  setActive: async (modelId: string): Promise<SetActiveModelResponse> => {
+    const response = await api.put<SetActiveModelResponse>('/planning-models/active', {
+      model_id: modelId,
+    });
+    return response.data;
+  },
+};
+
+// Prompts API
+export const promptsApi = {
+  list: async (page = 1, pageSize = 20): Promise<PromptListResponse> => {
+    const response = await api.get<PromptListResponse>('/prompts', {
+      params: { page, page_size: pageSize },
+    });
+    return response.data;
+  },
+
+  get: async (promptId: number): Promise<Prompt> => {
+    const response = await api.get<Prompt>(`/prompts/${promptId}`);
+    return response.data;
+  },
+
+  create: async (name: string, content: string, isActive = false): Promise<Prompt> => {
+    const response = await api.post<Prompt>('/prompts', {
+      name,
+      content,
+      is_active: isActive,
+    });
+    return response.data;
+  },
+
+  update: async (
+    promptId: number,
+    data: { name?: string; content?: string; is_active?: boolean },
+  ): Promise<Prompt> => {
+    const response = await api.patch<Prompt>(`/prompts/${promptId}`, data);
+    return response.data;
+  },
+
+  delete: async (promptId: number): Promise<void> => {
+    await api.delete(`/prompts/${promptId}`);
+  },
+
+  activate: async (promptId: number): Promise<Prompt> => {
+    const response = await api.put<Prompt>(`/prompts/${promptId}/activate`);
+    return response.data;
+  },
+};

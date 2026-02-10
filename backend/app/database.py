@@ -219,6 +219,23 @@ class TrainingSample(Base):
     training_job = relationship("TrainingJob", back_populates="samples")
 
 
+class Prompt(Base):
+    """
+    Represents a managed system prompt template.
+
+    Prompts are used as the system instruction for planning models.
+    Only one prompt can be active at a time.
+    """
+    __tablename__ = "prompts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # Database engine and session management
 _async_engine = None
 _async_session_factory = None
