@@ -347,10 +347,16 @@ def get_vector_context_manager() -> VectorContextManager:
     """Get the global VectorContextManager instance."""
     global _vector_context_manager
     if _vector_context_manager is None:
-        # Use persistent storage in data directory
-        persist_dir = str(Path(__file__).parent.parent.parent / "data" / "chroma_db")
+        from app.config import get_settings
+
+        settings = get_settings()
+        # Resolve chroma_persist_dir relative to the project root
+        persist_dir = str(
+            Path(__file__).resolve().parent.parent.parent / settings.chroma_persist_dir
+        )
         _vector_context_manager = VectorContextManager(
             persist_directory=persist_dir,
+            max_context_tokens=settings.max_context_tokens,
         )
     return _vector_context_manager
 

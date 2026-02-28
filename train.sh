@@ -181,9 +181,8 @@ print_config() {
 run_training() {
     print_info "Starting RL training..."
     
-    export AEGIS_TRAINING_BATCH_SIZE=$BATCH_SIZE
-    export AEGIS_REPLAY_BUFFER_SIZE=$BUFFER_SIZE
-    export AEGIS_DISCOUNT_FACTOR=$DISCOUNT_FACTOR
+    # Point backend to the project-root config file
+    export AEGIS_CONFIG="$SCRIPT_DIR/aegis.yaml"
     
     TRAIN_ARGS=""
     

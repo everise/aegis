@@ -42,6 +42,26 @@ interface BranchGroup {
   currentIndex: number;
 }
 
+/** SSE `memory_compressed` payload */
+export interface CompressionEvent {
+  tokens_before: number;
+  tokens_after: number;
+  original_count: number;
+  compressed_count: number;
+  ratio: number;
+  strategy: string;
+}
+
+/** SSE `memory_stats` payload */
+export interface MemoryStatsEvent {
+  total_tokens: number;
+  max_tokens: number;
+  usage_ratio: number;
+  message_count: number;
+  compression_count: number;
+  image_url_count: number;
+}
+
 // Session state for managing multiple concurrent sessions
 interface SessionState {
   eventSource: EventSource | null;
@@ -53,6 +73,9 @@ interface SessionState {
   assistantMessageId: string | null;
   // Branch management
   branchGroups: Map<string, BranchGroup>; // userMessageId -> branch group
+  // Memory compression events
+  compressionEvent: CompressionEvent | null;
+  memoryStatsEvent: MemoryStatsEvent | null;
 }
 
 // Global session state manager (persists across component re-renders)
@@ -68,6 +91,11 @@ type BranchStateListener = () => void;
 const branchStateListeners = new Set<BranchStateListener>();
 let branchStateVersion = 0;
 
+// Subscribers for compression state changes
+type CompressionStateListener = () => void;
+const compressionStateListeners = new Set<CompressionStateListener>();
+let compressionStateVersion = 0;
+
 function notifyRunningStateChange() {
   runningStateVersion++;
   runningStateListeners.forEach((listener) => listener());
@@ -76,6 +104,11 @@ function notifyRunningStateChange() {
 function notifyBranchStateChange() {
   branchStateVersion++;
   branchStateListeners.forEach((listener) => listener());
+}
+
+function notifyCompressionStateChange() {
+  compressionStateVersion++;
+  compressionStateListeners.forEach((listener) => listener());
 }
 
 export function subscribeToRunningState(listener: RunningStateListener): () => void {
@@ -94,6 +127,23 @@ export function subscribeToBranchState(listener: BranchStateListener): () => voi
 
 export function getBranchStateVersion(): number {
   return branchStateVersion;
+}
+
+export function subscribeToCompressionState(listener: CompressionStateListener): () => void {
+  compressionStateListeners.add(listener);
+  return () => compressionStateListeners.delete(listener);
+}
+
+export function getCompressionStateVersion(): number {
+  return compressionStateVersion;
+}
+
+export function getCompressionEvent(sessionId: number): CompressionEvent | null {
+  return sessionStates.get(sessionId)?.compressionEvent ?? null;
+}
+
+export function getMemoryStatsEvent(sessionId: number): MemoryStatsEvent | null {
+  return sessionStates.get(sessionId)?.memoryStatsEvent ?? null;
 }
 
 export function isSessionRunning(sessionId: number): boolean {
@@ -119,6 +169,8 @@ function getSessionState(sessionId: number): SessionState {
       finalImageUrl: null,
       assistantMessageId: null,
       branchGroups: new Map(),
+      compressionEvent: null,
+      memoryStatsEvent: null,
     });
   }
   return sessionStates.get(sessionId)!;
@@ -540,6 +592,12 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
               }
               // Reload messages from server to get persisted data
               setTimeout(() => loadMessages(sid), 1000);
+            } else if (data.type === "memory_compressed") {
+              state.compressionEvent = data.data as CompressionEvent;
+              notifyCompressionStateChange();
+            } else if (data.type === "memory_stats") {
+              state.memoryStatsEvent = data.data as MemoryStatsEvent;
+              notifyCompressionStateChange();
             } else if (data.type === "error") {
               const errorMessages = state.messages.map((m) =>
                 m.id === assistantMessageId
@@ -852,6 +910,12 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
             }
             // Notify branch state change to update branch picker UI
             notifyBranchStateChange();
+          } else if (data.type === "memory_compressed") {
+            state.compressionEvent = data.data as CompressionEvent;
+            notifyCompressionStateChange();
+          } else if (data.type === "memory_stats") {
+            state.memoryStatsEvent = data.data as MemoryStatsEvent;
+            notifyCompressionStateChange();
           } else if (data.type === "error") {
             const errorMessages = state.messages.map((m) =>
               m.id === assistantMessageId

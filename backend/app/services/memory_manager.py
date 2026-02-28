@@ -406,6 +406,120 @@ class HeuristicCompressor(BaseCompressor):
         }
 
 
+class ImportanceCompressor(BaseCompressor):
+    """
+    Importance-based compressor for multimodal agent memory.
+
+    Scores each message by a weighted combination of recency, role,
+    content richness, and multimodal importance (image URLs, quality
+    scores, skill results).  Low-importance messages are dropped first;
+    system messages are always preserved.
+
+    This replaces the former ``ImportancePruner`` from the standalone
+    context_pruner module, with added multimodal awareness.
+    """
+
+    def __init__(
+        self,
+        importance_threshold: float = 0.3,
+        protected_pairs: int = 2,
+    ):
+        self.importance_threshold = importance_threshold
+        self.protected_pairs = protected_pairs
+
+    def compute_importance(
+        self,
+        msg: MemoryMessage,
+        position: int,
+        total: int,
+    ) -> float:
+        """Compute importance score in [0, 1] for a message.
+
+        Factors:
+        - Recency (newer → higher)
+        - Role weight (user > system > assistant)
+        - Content length (longer → richer context)
+        - Multimodal value (image URLs, quality scores, skill results)
+        """
+        recency = position / total if total > 0 else 1.0
+        role_weights = {
+            MemoryRole.USER: 1.0,
+            MemoryRole.SYSTEM: 0.9,
+            MemoryRole.ASSISTANT: 0.8,
+            MemoryRole.COMPRESSED: 0.85,
+        }
+        role_factor = role_weights.get(msg.role, 0.5)
+        content_factor = min(1.0, len(msg.content) / 500)
+
+        # Multimodal bonus
+        mm_bonus = 0.0
+        if msg.image_urls:
+            mm_bonus += 0.15
+        if msg.quality_score is not None:
+            mm_bonus += 0.10
+        if msg.skill_results:
+            mm_bonus += 0.05
+        mm_bonus = min(mm_bonus, 0.3)
+
+        return (
+            0.30 * recency
+            + 0.25 * role_factor
+            + 0.10 * content_factor
+            + 0.15 * mm_bonus / 0.3 if mm_bonus else 0.0
+        ) + 0.20 * (1.0 if msg.image_urls or msg.quality_score is not None else 0.0)
+
+    async def compress(
+        self,
+        messages: List[MemoryMessage],
+        max_tokens: int,
+        token_counter: TokenCounter,
+    ) -> CompressionResult:
+        if not messages:
+            return CompressionResult([], 0, 0, 0, 0, CompressionStrategy.HEURISTIC)
+
+        tokens_before = sum(token_counter.count_message(m) for m in messages)
+
+        # System messages always kept
+        system_msgs = [m for m in messages if m.role == MemoryRole.SYSTEM]
+        non_system = [m for m in messages if m.role != MemoryRole.SYSTEM]
+
+        # Score every non-system message
+        scored = [
+            (m, self.compute_importance(m, i, len(non_system)))
+            for i, m in enumerate(non_system)
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # Greedily select within budget
+        system_tokens = sum(token_counter.count_message(m) for m in system_msgs)
+        budget = max_tokens - system_tokens
+        selected: List[MemoryMessage] = []
+        used = 0
+
+        for m, score in scored:
+            if score < self.importance_threshold:
+                continue
+            t = token_counter.count_message(m)
+            if used + t <= budget:
+                selected.append(m)
+                used += t
+
+        # Re-sort by original timestamp for coherent ordering
+        selected.sort(key=lambda m: m.timestamp)
+
+        result_msgs = system_msgs + selected
+        tokens_after = sum(token_counter.count_message(m) for m in result_msgs)
+
+        return CompressionResult(
+            compressed_messages=result_msgs,
+            original_count=len(messages),
+            compressed_count=len(result_msgs),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            strategy=CompressionStrategy.HEURISTIC,
+        )
+
+
 class LLMCompressor(BaseCompressor):
     """
     LLM-powered compressor that delegates summarisation to a model.
@@ -566,8 +680,12 @@ class SessionMemory:
     async def add(
         self,
         msg: Union[MemoryMessage, Sequence[MemoryMessage]],
-    ) -> None:
-        """Add one or more messages to working memory."""
+    ) -> Optional[CompressionResult]:
+        """Add one or more messages to working memory.
+
+        Returns a ``CompressionResult`` if compression was triggered,
+        otherwise ``None``.
+        """
         msgs = [msg] if isinstance(msg, MemoryMessage) else list(msg)
         for m in msgs:
             m = copy.deepcopy(m)
@@ -576,7 +694,8 @@ class SessionMemory:
             self._messages.append(m)
 
         if self._compress_on_add:
-            await self._check_and_compress()
+            return await self._check_and_compress()
+        return None
 
     async def get_context(
         self,
@@ -674,24 +793,28 @@ class SessionMemory:
 
     # ── Internal ──────────────────────────────────────────────────
 
-    async def _check_and_compress(self) -> bool:
-        """Compress if over token budget.  Returns True if compression ran."""
+    async def _check_and_compress(self) -> Optional[CompressionResult]:
+        """Compress if over token budget.
+
+        Returns a ``CompressionResult`` if compression was triggered,
+        otherwise ``None``.
+        """
         total = sum(self._token_counter.count_message(m) for m in self._messages)
         if total <= self.max_tokens:
-            return False
+            return None
 
         async with self._lock:
             # Re-check under lock
             total = sum(self._token_counter.count_message(m) for m in self._messages)
             if total <= self.max_tokens:
-                return False
+                return None
 
             result = await self._compressor.compress(
                 self._messages, self.max_tokens, self._token_counter,
             )
             self._messages = result.compressed_messages
             self._compression_count += 1
-            return True
+            return result
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -742,8 +865,11 @@ class MemoryManager:
         plan_json: Optional[Dict[str, Any]] = None,
         image_urls: Optional[List[str]] = None,
         quality_score: Optional[float] = None,
-    ) -> None:
-        """Convenience: create a MemoryMessage and add to session memory."""
+    ) -> Optional[CompressionResult]:
+        """Convenience: create a MemoryMessage and add to session memory.
+
+        Returns a ``CompressionResult`` if compression was triggered.
+        """
         msg = MemoryMessage(
             role=MemoryRole(role),
             content=content,
@@ -752,14 +878,17 @@ class MemoryManager:
             quality_score=quality_score,
         )
         mem = self.get_session_memory(session_id)
-        await mem.add(msg)
+        return await mem.add(msg)
 
-    async def add_db_message(self, msg: Any) -> None:
-        """Add a SQLAlchemy Message instance to working memory."""
+    async def add_db_message(self, msg: Any) -> Optional[CompressionResult]:
+        """Add a SQLAlchemy Message instance to working memory.
+
+        Returns a ``CompressionResult`` if compression was triggered.
+        """
         mm = MemoryMessage.from_db_message(msg)
         session_id = msg.session_id
         mem = self.get_session_memory(session_id)
-        await mem.add(mm)
+        return await mem.add(mm)
 
     async def get_context_for_planning(
         self,
@@ -828,7 +957,17 @@ def get_memory_manager() -> MemoryManager:
     """Get the global MemoryManager instance."""
     global _memory_manager
     if _memory_manager is None:
-        _memory_manager = MemoryManager()
+        from app.config import get_settings
+
+        settings = get_settings()
+        _memory_manager = MemoryManager(
+            default_max_tokens=settings.memory_max_tokens,
+            compressor=HeuristicCompressor(
+                protected_pairs=settings.memory_protected_pairs,
+            ),
+            compress_on_add=settings.memory_compress_on_add,
+            compress_on_get=settings.memory_compress_on_get,
+        )
     return _memory_manager
 
 

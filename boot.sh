@@ -9,12 +9,36 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# 默认配置
-HOST=${AEGIS_HOST:-"0.0.0.0"}
-PORT=${AEGIS_PORT:-8000}
-DEBUG=${AEGIS_DEBUG:-false}
+# 默认配置 (will be overridden by aegis.yaml)
+HOST="0.0.0.0"
+PORT=8000
+DEBUG=false
 SKIP_FRONTEND=${SKIP_FRONTEND:-false}
 DEV_MODE=${DEV_MODE:-false}
+
+# 从 aegis.yaml 读取配置 (需要 Python + PyYAML)
+read_config() {
+    CONFIG_FILE="$SCRIPT_DIR/aegis.yaml"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_warn "aegis.yaml not found, using defaults."
+        return
+    fi
+
+    # 使用 Python 解析 YAML （轻量、可靠）
+    eval "$($PYTHON_CMD -c "
+import yaml, sys
+with open('$CONFIG_FILE') as f:
+    cfg = yaml.safe_load(f) or {}
+s = cfg.get('server', {})
+print(f\"YAML_HOST={s.get('host', '')}\")
+print(f\"YAML_PORT={s.get('port', '')}\")
+print(f\"YAML_DEBUG={str(s.get('debug', '')).lower()}\")
+" 2>/dev/null)" || true
+
+    [ -n "$YAML_HOST" ]  && HOST="$YAML_HOST"
+    [ -n "$YAML_PORT" ]  && PORT="$YAML_PORT"
+    [ -n "$YAML_DEBUG" ] && [ "$YAML_DEBUG" != "" ] && DEBUG="$YAML_DEBUG"
+}
 
 # 颜色输出
 RED='\033[0;31m'
@@ -60,11 +84,9 @@ usage() {
     echo "  --skip-frontend       跳过前端构建"
     echo "  --help                显示帮助信息"
     echo ""
-    echo "Environment Variables:"
-    echo "  AEGIS_HOST            服务器主机"
-    echo "  AEGIS_PORT            服务器端口"
-    echo "  AEGIS_DEBUG           调试模式"
-    echo "  AEGIS_DATABASE_URL    数据库连接URL"
+    echo "Configuration:"
+    echo "  Settings are read from aegis.yaml in the project root."
+    echo "  Command-line flags override aegis.yaml values."
     echo ""
     echo "Examples:"
     echo "  $0                    # 默认启动"
@@ -257,9 +279,8 @@ start_server() {
     echo "=========================================="
     echo ""
     
-    export AEGIS_HOST=$HOST
-    export AEGIS_PORT=$PORT
-    export AEGIS_DEBUG=$DEBUG
+    # Set AEGIS_CONFIG so the Python backend finds the config file
+    export AEGIS_CONFIG="$SCRIPT_DIR/aegis.yaml"
     
     cd backend
     
@@ -285,6 +306,7 @@ main() {
     
     check_python
     setup_venv
+    read_config
     check_node
     install_backend_deps
     setup_directories

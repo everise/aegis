@@ -45,20 +45,19 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 
 @pytest.fixture
 def test_settings() -> Settings:
-    """Create test settings with overridden values."""
+    """Create test settings with overridden values (no YAML file needed)."""
     reset_settings()
-    os.environ["AEGIS_DATABASE_URL"] = TEST_DATABASE_URL
-    os.environ["AEGIS_DEBUG"] = "true"
-    os.environ["AEGIS_REMOTE_API_BASE_URL"] = "http://mock-api:8000/api/v1/tasks"
-    
-    from app.config import get_settings
-    settings = get_settings()
+    settings = Settings(
+        database_url=TEST_DATABASE_URL,
+        debug=True,
+        remote_api_base_url="http://mock-api:8000/api/v1/tasks",
+    )
+    # Inject into the global singleton so get_settings() returns it.
+    import app.config as _cfg
+    _cfg._settings = settings
     
     yield settings
     
-    # Cleanup
-    for key in ["AEGIS_DATABASE_URL", "AEGIS_DEBUG", "AEGIS_REMOTE_API_BASE_URL"]:
-        os.environ.pop(key, None)
     reset_settings()
 
 

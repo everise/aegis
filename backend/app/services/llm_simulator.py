@@ -28,6 +28,86 @@ class ReActStep:
     action_input: Dict[str, Any]
 
 
+# ──────────────────────────────────────────────────────────────────
+# Verbose thought fragments — randomly injected to inflate token count
+# and trigger memory compression during mock conversations.
+# ──────────────────────────────────────────────────────────────────
+VERBOSE_THOUGHT_FRAGMENTS = [
+    (
+        "Let me conduct a thorough analysis of the compositional elements. "
+        "The rule of thirds suggests placing key elements along invisible grid lines that "
+        "divide the frame into nine equal parts. Leading lines can guide the viewer's eye "
+        "through the image. The golden ratio (approximately 1.618:1) is another powerful "
+        "compositional tool that creates naturally pleasing proportions. Color harmony follows "
+        "the color wheel, with complementary colors providing contrast and analogous colors "
+        "offering unity. Warm tones (reds, oranges, yellows) advance toward the viewer, while "
+        "cool tones (blues, greens, purples) recede, creating depth."
+    ),
+    (
+        "From a technical perspective, I should consider the dynamic range of the final image. "
+        "High dynamic range (HDR) techniques can preserve detail in both shadows and highlights. "
+        "The histogram should show a balanced distribution of tonal values across the luminance "
+        "spectrum. Edge sharpness at various frequency bands (low, mid, high) determines the "
+        "perceived detail level. Anti-aliasing helps smooth jagged edges, particularly along "
+        "diagonal lines and curves. Noise reduction algorithms need to balance between preserving "
+        "detail and removing unwanted grain, especially in areas of uniform color."
+    ),
+    (
+        "The psychological impact of visual elements is significant. Research in visual perception "
+        "shows that humans process images in approximately 13 milliseconds, long before conscious "
+        "awareness. Facial recognition, symmetry detection, and color associations happen at a "
+        "pre-attentive level. The gestalt principles of proximity, similarity, continuity, and "
+        "closure all influence how viewers perceive and organize visual information. This understanding "
+        "helps in creating images that communicate the intended message effectively."
+    ),
+    (
+        "Considering the art historical context, this type of visual work draws on traditions "
+        "ranging from Renaissance chiaroscuro (the interplay of light and shadow) to Impressionist "
+        "color theory (optical mixing, broken color technique) to contemporary digital art "
+        "aesthetics. Each tradition brings specific expectations about quality: accuracy of "
+        "proportions, richness of palette, sophistication of lighting, and emotional resonance. "
+        "Modern generative art adds new dimensions including procedural complexity, emergent patterns, "
+        "and the fascinating interplay between algorithmic precision and organic imperfection."
+    ),
+    (
+        "The semantic alignment between the textual prompt and the visual output requires careful "
+        "evaluation. This involves checking whether all explicitly mentioned objects are present, "
+        "whether spatial relationships described in the prompt (above, below, next to, behind) are "
+        "correctly rendered, whether the mood and atmosphere match the implied emotional tone of "
+        "the text, and whether any attributes (colors, sizes, quantities) are accurately represented. "
+        "Implicit expectations from common sense must also be satisfied — a sunset scene should have "
+        "warm lighting, a winter landscape should suggest cold."
+    ),
+    (
+        "I need to evaluate the perceptual quality metrics more carefully. The Fréchet Inception "
+        "Distance (FID) measures the distance between the distribution of generated images and real "
+        "images in a feature space. The Inception Score (IS) evaluates both quality and diversity. "
+        "CLIP-based metrics can assess text-image alignment by comparing embeddings in a shared "
+        "latent space. The aesthetic predictor models trained on large datasets of human preference "
+        "judgments provide another quality dimension. These quantitative metrics complement subjective "
+        "human evaluation."
+    ),
+    (
+        "From a multi-modal perspective, the relationship between text and image generation is "
+        "bidirectional. The text encoder transforms the prompt into a latent representation that "
+        "guides the diffusion process. Each word's influence is modulated by the attention mechanism, "
+        "with some words having stronger impact on the final output. Cross-attention layers allow the "
+        "model to focus on different parts of the text at different stages of generation. The denoising "
+        "process gradually refines random noise into a coherent image, guided by this textual signal. "
+        "Understanding this pipeline helps in crafting better prompts and evaluating outputs."
+    ),
+    (
+        "Regarding color science, the CIE L*a*b* color space provides a perceptually uniform "
+        "representation where equal distances correspond to equal perceived color differences. "
+        "Delta E (ΔE) values below 1.0 are generally imperceptible, while values above 5.0 are "
+        "obviously different. Gamut mapping ensures colors can be reproduced across different "
+        "devices and media. ICC profiles define the color characteristics of input and output "
+        "devices. Wide-gamut displays (such as DCI-P3 or Rec.2020) can represent more saturated "
+        "colors than standard sRGB, which is important for vibrant, colorful images."
+    ),
+]
+
+
 # Predefined response templates for different scenarios
 # Each scenario has multiple variations for more realistic conversations
 RESPONSE_TEMPLATES = {
@@ -100,6 +180,9 @@ class LLMSimulator:
     
     Used for development and testing without requiring actual LLM API calls.
     Follows a predetermined flow: generate -> evaluate -> (repair if needed) -> finish
+    
+    When verbose_probability > 0, some steps randomly include lengthy analysis
+    paragraphs that inflate the token count, which helps test memory compression.
     """
     
     def __init__(
@@ -107,10 +190,14 @@ class LLMSimulator:
         quality_threshold: float = 0.7,
         max_repair_attempts: int = 2,
         simulate_delay: bool = False,
+        verbose_probability: float = 0.6,
+        verbose_fragments_range: tuple = (2, 5),
     ):
         self.quality_threshold = quality_threshold
         self.max_repair_attempts = max_repair_attempts
         self.simulate_delay = simulate_delay
+        self.verbose_probability = verbose_probability
+        self.verbose_fragments_range = verbose_fragments_range
         
         # State tracking
         self._step_count = 0
@@ -124,13 +211,32 @@ class LLMSimulator:
         self._repair_count = 0
         self._current_image_url = None
         self._last_quality_score = None
+
+    def _maybe_pad_thought(self, thought: str) -> str:
+        """Randomly pad a thought with verbose analysis fragments.
+        
+        This inflates the token count so that memory compression
+        is triggered after several rounds of conversation.
+        """
+        if random.random() >= self.verbose_probability:
+            return thought
+        
+        lo, hi = self.verbose_fragments_range
+        n = random.randint(lo, hi)
+        fragments = random.sample(
+            VERBOSE_THOUGHT_FRAGMENTS,
+            min(n, len(VERBOSE_THOUGHT_FRAGMENTS)),
+        )
+        padded = thought + "\n\n" + "\n\n".join(fragments)
+        return padded
     
     def _interpolate_template(
         self,
         step: ReActStep,
         context: Dict[str, Any],
     ) -> ReActStep:
-        """Replace placeholders in template with actual values."""
+        """Replace placeholders in template with actual values,
+        and optionally pad the thought with verbose fragments."""
         thought = step.thought
         
         # Deep copy and replace placeholders manually
@@ -147,6 +253,9 @@ class LLMSimulator:
             return obj
         
         action_input = replace_placeholders(step.action_input, context) if context else step.action_input
+        
+        # Apply verbose padding with randomness
+        thought = self._maybe_pad_thought(thought)
         
         return ReActStep(
             thought=thought,

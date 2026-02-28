@@ -5,6 +5,7 @@ Defines the interface that all planning model implementations must follow.
 """
 
 import json
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -46,6 +47,68 @@ class BasePlanningModel(ABC):
     (e.g., Gemini, Kimi, Qwen VL) and provides the ReAct-style
     reasoning interface used by the planner.
     """
+
+    # ── Verbose padding for memory-compression testing ──────────
+    _VERBOSE_FRAGMENTS = [
+        (
+            "Performing a detailed compositional analysis: the rule of thirds, leading lines, "
+            "golden ratio (≈1.618:1), color harmony via the color wheel, warm-vs-cool depth cues, "
+            "and figure-ground separation all need careful consideration before I proceed."
+        ),
+        (
+            "Assessing technical quality dimensions: dynamic range preservation, histogram balance "
+            "across luminance spectrum, edge sharpness at multiple frequency bands, anti-aliasing "
+            "quality along diagonals, and noise-vs-detail trade-off in uniform-color regions."
+        ),
+        (
+            "Evaluating perceptual quality: FID (Fréchet Inception Distance), Inception Score, "
+            "CLIP-based text-image alignment in shared latent space, aesthetic predictor confidence, "
+            "and subjective human-preference correlation all inform this assessment."
+        ),
+        (
+            "Considering art-historical context: Renaissance chiaroscuro for light-shadow interplay, "
+            "Impressionist optical mixing and broken color, Bauhaus design principles, and contemporary "
+            "digital art aesthetics with procedural complexity and emergent organic patterns."
+        ),
+        (
+            "Checking semantic alignment: presence of all explicitly mentioned objects, correct spatial "
+            "relationships (above/below/beside/behind), mood-atmosphere coherence with prompt tone, "
+            "accurate attribute rendering (color, size, quantity), and common-sense plausibility."
+        ),
+        (
+            "Analyzing color science: CIE L*a*b* perceptual uniformity, ΔE thresholds (< 1 imperceptible, "
+            "> 5 obvious), gamut mapping for sRGB/DCI-P3/Rec.2020 coverage, ICC profile conformance, "
+            "and saturation headroom for vibrant outputs."
+        ),
+        (
+            "Running cognitive-perceptual review: 13 ms pre-attentive image processing, facial recognition "
+            "circuits, symmetry detection, gestalt grouping (proximity, similarity, continuity, closure), "
+            "and visual saliency mapping to predict viewer attention distribution."
+        ),
+        (
+            "Multi-modal reasoning pipeline check: text encoder → latent representation, cross-attention "
+            "layer focus per word, denoising U-Net refinement schedule, classifier-free guidance scale "
+            "trade-off between fidelity and diversity, and VAE decoder reconstruction quality."
+        ),
+    ]
+
+    def _maybe_pad_thought(
+        self,
+        thought: str,
+        probability: float = 0.6,
+        fragment_range: tuple = (2, 4),
+    ) -> str:
+        """Randomly pad *thought* with verbose analysis fragments.
+
+        Used by mock planning models to inflate token counts and
+        trigger working-memory compression during development.
+        """
+        if random.random() >= probability:
+            return thought
+        lo, hi = fragment_range
+        n = random.randint(lo, min(hi, len(self._VERBOSE_FRAGMENTS)))
+        fragments = random.sample(self._VERBOSE_FRAGMENTS, n)
+        return thought + "\n\n" + "\n\n".join(fragments)
 
     @abstractmethod
     def info(self) -> PlanningModelInfo:

@@ -201,8 +201,10 @@ class GeminiPlanningModel(BasePlanningModel):
 
     def _from_template(self, key: str, ctx: Dict[str, str]) -> PlanningStep:
         tpl = random.choice(_TEMPLATES[key])
+        thought = self._replace(tpl.thought, ctx)
+        thought = self._maybe_pad_thought(thought)
         return PlanningStep(
-            thought=self._replace(tpl.thought, ctx),
+            thought=thought,
             action=tpl.action,
             action_input=self._replace_dict(tpl.action_input, ctx),
         )

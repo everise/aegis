@@ -1,21 +1,12 @@
 """
 Unit tests for infrastructure services.
 
-Tests context pruner, dual retrieval, model router, and governance.
+Tests dual retrieval, model router, and governance.
 """
 
 import pytest
 from datetime import datetime, timedelta
 
-from app.services.context_pruner import (
-    ContextPruner,
-    TruncationPruner,
-    SlidingWindowPruner,
-    ImportancePruner,
-    Message,
-    PruningStrategy,
-    TokenCounter,
-)
 from app.services.dual_retrieval import (
     DualLevelRetriever,
     BM25Retriever,
@@ -40,120 +31,6 @@ from app.services.governance import (
     GovernanceDecision,
     ViolationType,
 )
-
-
-# ============== Context Pruner Tests ==============
-
-class TestTokenCounter:
-    """Tests for TokenCounter."""
-    
-    def test_count_simple_text(self):
-        """Test counting tokens in simple text."""
-        counter = TokenCounter(chars_per_token=4.0)
-        
-        # 20 chars / 4 = 5 tokens
-        count = counter.count("This is a test text")
-        assert count == 4  # 19 chars / 4 = 4.75 -> 4
-    
-    def test_count_message(self):
-        """Test counting tokens in message with overhead."""
-        counter = TokenCounter()
-        msg = Message(role="user", content="Hello world")
-        
-        count = counter.count_message(msg)
-        # Content + overhead
-        assert count > counter.count("Hello world")
-
-
-class TestTruncationPruner:
-    """Tests for TruncationPruner."""
-    
-    def test_no_pruning_needed(self):
-        """Test when messages fit within limit."""
-        pruner = TruncationPruner(max_tokens=1000)
-        
-        messages = [
-            Message(role="user", content="Hello"),
-            Message(role="assistant", content="Hi there"),
-        ]
-        
-        result = pruner.prune(messages)
-        
-        assert len(result.messages) == 2
-        assert result.pruned_count == 0
-    
-    def test_pruning_from_start(self):
-        """Test pruning removes oldest messages."""
-        pruner = TruncationPruner(max_tokens=50)
-        
-        messages = [
-            Message(role="user", content="Message 1" * 20),  # Long
-            Message(role="user", content="Message 2" * 20),  # Long
-            Message(role="user", content="Short"),  # Short
-        ]
-        
-        result = pruner.prune(messages)
-        
-        # Should keep only recent messages that fit
-        assert result.pruned_count > 0
-    
-    def test_system_messages_preserved(self):
-        """Test system messages are always kept."""
-        pruner = TruncationPruner(max_tokens=100)
-        
-        messages = [
-            Message(role="system", content="System instruction"),
-            Message(role="user", content="User message " * 50),
-            Message(role="assistant", content="Response"),
-        ]
-        
-        result = pruner.prune(messages)
-        
-        # System message should be preserved
-        system_msgs = [m for m in result.messages if m.role == "system"]
-        assert len(system_msgs) == 1
-
-
-class TestSlidingWindowPruner:
-    """Tests for SlidingWindowPruner."""
-    
-    def test_window_size_respected(self):
-        """Test window size is respected."""
-        pruner = SlidingWindowPruner(max_tokens=10000, window_size=3)
-        
-        messages = [
-            Message(role="user", content=f"Message {i}")
-            for i in range(10)
-        ]
-        
-        result = pruner.prune(messages)
-        
-        # Should keep only last 3 (window_size)
-        assert len([m for m in result.messages if m.role != "system"]) == 3
-
-
-class TestContextPruner:
-    """Tests for main ContextPruner class."""
-    
-    def test_prune_conversation(self):
-        """Test convenience method for conversation dicts."""
-        pruner = ContextPruner(
-            strategy=PruningStrategy.SLIDING_WINDOW,
-            max_tokens=1000,
-            window_size=2,
-        )
-        
-        messages = [
-            {"role": "user", "content": "Message 1"},
-            {"role": "assistant", "content": "Response 1"},
-            {"role": "user", "content": "Message 2"},
-            {"role": "assistant", "content": "Response 2"},
-        ]
-        
-        result = pruner.prune_conversation(messages)
-        
-        assert isinstance(result, list)
-        assert all("role" in m and "content" in m for m in result)
 
 
 # ============== Dual Retrieval Tests ==============

@@ -1,0 +1,46 @@
+# ============================================
+# Aegis Configuration File
+# ============================================
+# 所有配置项集中管理，启动时由后端和脚本统一读取。
+# 修改后重启服务生效。
+
+# ── 服务器设置 ──────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+
+# ── 数据库设置 ──────────────────────────────
+database:
+  url: "sqlite+aiosqlite:///./data/aegis.db"
+
+# ── 远程服务设置 ────────────────────────────
+remote:
+  api_base_url: "http://localhost:8000/api/v1/tasks"
+
+# ── 技能设置 ────────────────────────────────
+skills:
+  dir: "skills"
+
+# ── 强化学习训练设置 ────────────────────────
+training:
+  max_trajectory_steps: 10
+  replay_buffer_size: 10000
+  batch_size: 32
+  discount_factor: 0.99
+
+# ── SSE 设置 ────────────────────────────────
+sse:
+  ping_interval: 30
+
+# ── 多模态记忆压缩设置 ──────────────────────
+memory:
+  max_tokens: 4000
+  compress_on_add: true
+  compress_on_get: true
+  protected_pairs: 2
+
+# ── 向量数据库设置 ──────────────────────────
+vector:
+  chroma_persist_dir: "data/chroma_db"
+  max_context_tokens: 128000

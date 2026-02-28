@@ -378,9 +378,23 @@ async def chat_stream(
         print(f"Warning: Failed to store message in vector context: {e}")
     
     # Store in working memory
+    compression_event_holder: dict = {"event": None}
     try:
         mm = get_memory_manager()
-        await mm.add_db_message(user_message)
+        comp_result = await mm.add_db_message(user_message)
+        if comp_result is not None:
+            compression_event_holder["event"] = {
+                "type": "memory_compressed",
+                "data": {
+                    "tokens_before": comp_result.tokens_before,
+                    "tokens_after": comp_result.tokens_after,
+                    "original_count": comp_result.original_count,
+                    "compressed_count": comp_result.compressed_count,
+                    "ratio": round(comp_result.tokens_after / comp_result.tokens_before, 3)
+                        if comp_result.tokens_before > 0 else 1.0,
+                    "strategy": comp_result.strategy.value,
+                },
+            }
     except Exception as e:
         print(f"Warning: Failed to store user message in working memory: {e}")
     
@@ -444,6 +458,18 @@ async def chat_stream(
         
         # Send connected event
         yield f"data: {json.dumps({'type': 'connected', 'data': {'session_id': session_id}})}\n\n"
+        
+        # If compression was triggered by the user message, emit an event
+        if compression_event_holder["event"]:
+            yield f"data: {json.dumps(compression_event_holder['event'])}\n\n"
+        
+        # Emit current memory stats
+        try:
+            mm = get_memory_manager()
+            mem_stats = mm.get_stats(session_id)
+            yield f"data: {json.dumps({'type': 'memory_stats', 'data': {'total_tokens': mem_stats.total_tokens, 'max_tokens': mem_stats.max_tokens, 'usage_ratio': round(mem_stats.usage_ratio, 3), 'message_count': mem_stats.message_count, 'compression_count': mem_stats.compression_count, 'image_url_count': mem_stats.image_url_count}})}\n\n"
+        except Exception:
+            pass
         
         # Execute planning with streaming — use active planning model
         registry = get_planning_registry()

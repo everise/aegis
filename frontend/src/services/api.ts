@@ -209,7 +209,23 @@ export const contextApi = {
     const response = await api.get<ContextStatsResponse>(`/context/${sessionId}/stats`);
     return response.data;
   },
+  getMemoryStats: async (sessionId: number): Promise<MemoryStatsResponse> => {
+    const response = await api.get<MemoryStatsResponse>(`/context/${sessionId}/memory/stats`);
+    return response.data;
+  },
 };
+
+// Memory Stats API (working memory with compression)
+export interface MemoryStatsResponse {
+  session_id: number;
+  message_count: number;
+  compressed_count: number;
+  total_tokens: number;
+  max_tokens: number;
+  usage_ratio: number;
+  image_url_count: number;
+  compression_count: number;
+}
 
 // Planning Models API
 export interface PlanningModel {
