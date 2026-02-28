@@ -79,6 +79,11 @@ def _flatten(data: Dict[str, Any]) -> Dict[str, Any]:
         ("memory", "protected_pairs"): "memory_protected_pairs",
         ("vector", "chroma_persist_dir"): "chroma_persist_dir",
         ("vector", "max_context_tokens"): "max_context_tokens",
+        ("retrieval", "coarse_k"): "retrieval_coarse_k",
+        ("retrieval", "fine_k"): "retrieval_fine_k",
+        ("retrieval", "rrf_k"): "retrieval_rrf_k",
+        ("retrieval", "top_k"): "retrieval_top_k",
+        ("retrieval", "enabled"): "retrieval_enabled",
     }
 
     for (section, key), field_name in mapping.items():
@@ -151,6 +156,28 @@ class Settings(BaseModel):
     max_context_tokens: int = Field(
         default=128000,
         description="Maximum context window token count",
+    )
+
+    # Dual-Level Retrieval
+    retrieval_coarse_k: int = Field(
+        default=50,
+        description="BM25 coarse retrieval: number of candidates",
+    )
+    retrieval_fine_k: int = Field(
+        default=50,
+        description="Semantic fine retrieval: number of candidates",
+    )
+    retrieval_rrf_k: int = Field(
+        default=60,
+        description="RRF smoothing constant (higher = more weight to lower ranks)",
+    )
+    retrieval_top_k: int = Field(
+        default=3,
+        description="Number of final retrieval results to inject as context",
+    )
+    retrieval_enabled: bool = Field(
+        default=True,
+        description="Enable dual-level retrieval augmentation in the ReAct planner",
     )
 
     # ── validators ───────────────────────────────────────────────

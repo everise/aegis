@@ -3,16 +3,32 @@ Multi-Model Router for load balancing and model selection.
 
 Routes requests to appropriate models based on task type,
 load, cost, and quality requirements.
+
+Features:
+  - 6 routing strategies: round-robin, least-load, random,
+    cost-optimised, quality-optimised, latency-optimised
+  - Circuit breaker per endpoint (closed → open → half-open)
+    based on consecutive failure count and configurable thresholds
+  - Async background health-check loop with configurable interval
+  - EMA-based latency tracking and per-minute rate limiting
+
+References:
+  [1] Nygard — "Release It!" (circuit breaker pattern)
+  [2] Netflix Hystrix — production circuit breaker design
 """
 
 from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from enum import Enum
+import logging
 import random
 import time
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 
 class ModelCapability(str, Enum):
@@ -25,6 +41,13 @@ class ModelCapability(str, Enum):
     CHAT = "chat"
 
 
+class CircuitState(str, Enum):
+    """Circuit breaker states (Nygard / Netflix Hystrix pattern)."""
+    CLOSED = "closed"        # normal operation — requests flow through
+    OPEN = "open"            # failures exceeded threshold — requests rejected
+    HALF_OPEN = "half_open"  # cooldown elapsed — allow one probe request
+
+
 class RoutingStrategy(str, Enum):
     """Available routing strategies."""
     ROUND_ROBIN = "round_robin"
@@ -34,6 +57,97 @@ class RoutingStrategy(str, Enum):
     QUALITY_OPTIMIZED = "quality_optimized"
     LATENCY_OPTIMIZED = "latency_optimized"
 
+
+# ──────────────────────────────────────────────────────────────────
+# Circuit Breaker
+# ──────────────────────────────────────────────────────────────────
+
+@dataclass
+class CircuitBreaker:
+    """
+    Per-endpoint circuit breaker (closed → open → half-open → closed).
+
+    Design follows the canonical pattern described in Michael Nygard's
+    *Release It!* and popularised by Netflix Hystrix / resilience4j:
+
+      CLOSED  —— failures reach *failure_threshold*  ──▶  OPEN
+      OPEN    —— *recovery_timeout* seconds elapse    ──▶  HALF_OPEN
+      HALF_OPEN — probe succeeds                      ──▶  CLOSED
+      HALF_OPEN — probe fails                         ──▶  OPEN
+    """
+
+    failure_threshold: int = 5           # consecutive failures to trip
+    recovery_timeout: float = 30.0       # seconds before half-open probe
+    half_open_max_calls: int = 1         # probe requests in half-open state
+
+    # ── internal state ──
+    state: CircuitState = CircuitState.CLOSED
+    consecutive_failures: int = 0
+    last_failure_time: float = 0.0
+    half_open_calls: int = 0
+
+    # ── public API ────────────────────────────────────────────────
+
+    def allow_request(self) -> bool:
+        """Return *True* if the circuit allows a request through."""
+        if self.state == CircuitState.CLOSED:
+            return True
+
+        if self.state == CircuitState.OPEN:
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                self._transition(CircuitState.HALF_OPEN)
+                return True
+            return False
+
+        # HALF_OPEN: allow up to *half_open_max_calls* probes
+        if self.half_open_calls < self.half_open_max_calls:
+            self.half_open_calls += 1
+            return True
+        return False
+
+    def record_success(self) -> None:
+        """Record a successful request."""
+        if self.state == CircuitState.HALF_OPEN:
+            # probe succeeded → close the circuit
+            self._transition(CircuitState.CLOSED)
+        self.consecutive_failures = 0
+
+    def record_failure(self) -> None:
+        """Record a failed request."""
+        self.consecutive_failures += 1
+        self.last_failure_time = time.time()
+
+        if self.state == CircuitState.HALF_OPEN:
+            # probe failed → reopen
+            self._transition(CircuitState.OPEN)
+        elif (
+            self.state == CircuitState.CLOSED
+            and self.consecutive_failures >= self.failure_threshold
+        ):
+            self._transition(CircuitState.OPEN)
+
+    def reset(self) -> None:
+        """Force-reset to closed state."""
+        self._transition(CircuitState.CLOSED)
+
+    # ── internal ─────────────────────────────────────────────────
+
+    def _transition(self, new_state: CircuitState) -> None:
+        old = self.state
+        self.state = new_state
+        if new_state == CircuitState.CLOSED:
+            self.consecutive_failures = 0
+            self.half_open_calls = 0
+        elif new_state == CircuitState.HALF_OPEN:
+            self.half_open_calls = 0
+        logger.info(
+            "Circuit breaker transition: %s → %s", old.value, new_state.value,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Model Endpoint
+# ──────────────────────────────────────────────────────────────────
 
 @dataclass
 class ModelEndpoint:
@@ -62,6 +176,9 @@ class ModelEndpoint:
     requests_per_minute: int = 60
     request_count_this_minute: int = 0
     minute_start: datetime = field(default_factory=datetime.utcnow)
+
+    # Circuit breaker
+    circuit_breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
     
     @property
     def load_factor(self) -> float:
@@ -73,10 +190,15 @@ class ModelEndpoint:
         """Success rate of requests."""
         total = self.success_count + self.error_count
         return self.success_count / total if total > 0 else 1.0
+
+    @property
+    def is_available(self) -> bool:
+        """Check if the endpoint is healthy AND circuit is not open."""
+        return self.is_healthy and self.circuit_breaker.allow_request()
     
     def can_handle(self, capability: ModelCapability) -> bool:
-        """Check if endpoint supports the capability."""
-        return capability in self.capabilities and self.is_healthy
+        """Check if endpoint supports the capability and is available."""
+        return capability in self.capabilities and self.is_available
     
     def is_rate_limited(self) -> bool:
         """Check if endpoint is rate limited."""
@@ -89,14 +211,16 @@ class ModelEndpoint:
         return self.request_count_this_minute >= self.requests_per_minute
     
     def record_request(self, success: bool, latency_ms: float) -> None:
-        """Record request outcome for statistics."""
+        """Record request outcome for statistics and circuit breaker."""
         if success:
             self.success_count += 1
             # Update average latency with exponential moving average
             alpha = 0.1
             self.avg_latency_ms = (1 - alpha) * self.avg_latency_ms + alpha * latency_ms
+            self.circuit_breaker.record_success()
         else:
             self.error_count += 1
+            self.circuit_breaker.record_failure()
         
         self.request_count_this_minute += 1
 
@@ -214,6 +338,23 @@ class LatencyOptimizedRouter(BaseRouter):
         return min(available, key=lambda e: e.avg_latency_ms)
 
 
+class RandomRouter(BaseRouter):
+    """Random routing strategy — uniform random selection among available endpoints."""
+
+    def select_endpoint(
+        self,
+        endpoints: List[ModelEndpoint],
+        capability: ModelCapability,
+    ) -> Optional[ModelEndpoint]:
+        """Select a random available endpoint."""
+        available = [e for e in endpoints if e.can_handle(capability) and not e.is_rate_limited()]
+
+        if not available:
+            return None
+
+        return random.choice(available)
+
+
 class ModelRouter:
     """
     Main model router that manages endpoints and routing decisions.
@@ -222,6 +363,7 @@ class ModelRouter:
     ROUTERS = {
         RoutingStrategy.ROUND_ROBIN: RoundRobinRouter,
         RoutingStrategy.LEAST_LOAD: LeastLoadRouter,
+        RoutingStrategy.RANDOM: RandomRouter,
         RoutingStrategy.COST_OPTIMIZED: CostOptimizedRouter,
         RoutingStrategy.QUALITY_OPTIMIZED: QualityOptimizedRouter,
         RoutingStrategy.LATENCY_OPTIMIZED: LatencyOptimizedRouter,
@@ -243,6 +385,10 @@ class ModelRouter:
         
         # Statistics
         self._routing_history: List[Dict[str, Any]] = []
+
+        # Background health-check task
+        self._health_task: Optional[asyncio.Task] = None
+        self._health_fn: Optional[Callable] = None
     
     def register_endpoint(self, endpoint: ModelEndpoint) -> None:
         """Register a model endpoint."""
@@ -375,15 +521,107 @@ class ModelRouter:
         }
         
         for endpoint in self._endpoints.values():
+            cb = endpoint.circuit_breaker
             stats["endpoints"][endpoint.endpoint_id] = {
                 "name": endpoint.name,
                 "healthy": endpoint.is_healthy,
                 "load_factor": endpoint.load_factor,
                 "success_rate": endpoint.success_rate,
                 "avg_latency_ms": endpoint.avg_latency_ms,
+                "circuit_state": cb.state.value,
+                "consecutive_failures": cb.consecutive_failures,
             }
         
         return stats
+
+    # ── Async health-check loop ──────────────────────────────────
+
+    async def start_health_checks(
+        self,
+        health_fn: Optional[Callable[[ModelEndpoint], Awaitable[bool]]] = None,
+    ) -> None:
+        """
+        Start periodic background health checks for all registered endpoints.
+
+        Args:
+            health_fn: An async callable ``(endpoint) -> bool``.
+                       If *None* a default HTTP GET probe is used.
+        """
+        if self._health_task is not None:
+            return  # already running
+
+        self._health_fn = health_fn or self._default_health_probe
+        self._health_task = asyncio.create_task(self._health_loop())
+        logger.info("Health-check loop started (interval=%.1fs)", self.health_check_interval)
+
+    async def stop_health_checks(self) -> None:
+        """Stop the background health-check loop."""
+        if self._health_task is not None:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            self._health_task = None
+            logger.info("Health-check loop stopped")
+
+    async def _health_loop(self) -> None:
+        """Internal loop that periodically probes every endpoint."""
+        while True:
+            try:
+                await asyncio.sleep(self.health_check_interval)
+                await self._run_health_checks()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error during health-check cycle")
+
+    async def _run_health_checks(self) -> None:
+        """Run a single round of health checks across all endpoints."""
+        tasks = {
+            eid: asyncio.create_task(self._check_one(ep))
+            for eid, ep in self._endpoints.items()
+        }
+        if not tasks:
+            return
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    async def _check_one(self, endpoint: ModelEndpoint) -> None:
+        """Probe a single endpoint and update its health status."""
+        try:
+            healthy = await self._health_fn(endpoint)
+        except Exception:
+            healthy = False
+
+        prev = endpoint.is_healthy
+        endpoint.is_healthy = healthy
+        endpoint.last_health_check = datetime.utcnow()
+
+        if healthy and not prev:
+            endpoint.circuit_breaker.reset()
+            logger.info("Endpoint %s recovered", endpoint.endpoint_id)
+        elif not healthy and prev:
+            logger.warning("Endpoint %s is now unhealthy", endpoint.endpoint_id)
+
+    @staticmethod
+    async def _default_health_probe(endpoint: ModelEndpoint) -> bool:
+        """
+        Default health probe: HTTP GET ``{base_url}/health``.
+
+        Falls back to *True* (assume healthy) if httpx is not installed
+        so the router works out of the box without extra dependencies.
+        """
+        try:
+            import httpx  # optional dependency
+        except ImportError:
+            return True
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{endpoint.base_url}/health")
+                return resp.status_code < 500
+        except Exception:
+            return False
 
 
 # Pre-configured router for image generation

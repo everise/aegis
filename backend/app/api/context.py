@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.services.vector_context import get_vector_context_manager, ContextStats
 from app.services.memory_manager import get_memory_manager
+from app.services.dual_retrieval import get_knowledge_base
 
 
 router = APIRouter()
@@ -231,3 +232,90 @@ async def clear_memory(session_id: int):
         "session_id": session_id,
         "message": "Working memory cleared",
     }
+
+
+# ── Dual-Level Retrieval endpoints ────────────────────────────────
+
+class RetrievalResultItem(BaseModel):
+    """A single retrieval result."""
+    doc_id: str
+    content: str
+    category: str = ""
+    score: float = 0.0
+    rank: int = 0
+    retrieval_stage: str = "rrf_fused"
+
+
+class RetrievalQueryResponse(BaseModel):
+    """Response for retrieval query."""
+    query: str
+    results: List[RetrievalResultItem]
+    total_candidates: int
+    coarse_time_ms: float
+    fine_time_ms: float
+    fusion_time_ms: float
+
+
+class PromptSuggestionResponse(BaseModel):
+    """Response for prompt suggestions."""
+    original_prompt: str
+    relevant_knowledge: List[dict]
+    enhancement_tips: List[str]
+
+
+@router.get("/retrieval/query", response_model=RetrievalQueryResponse)
+async def retrieval_query(
+    query: str = Query(..., min_length=1, description="Search query text"),
+    top_k: int = Query(default=5, ge=1, le=20, description="Number of results"),
+) -> RetrievalQueryResponse:
+    """
+    Query the image-generation knowledge base using Dual-Level Retrieval.
+
+    Uses BM25 coarse retrieval + ChromaDB semantic retrieval fused via
+    Reciprocal Rank Fusion (RRF) to find the most relevant knowledge.
+    """
+    kb = get_knowledge_base()
+    await kb.ensure_loaded()
+    response = await kb.retriever.retrieve(query, top_k)
+
+    items = [
+        RetrievalResultItem(
+            doc_id=r.document.doc_id,
+            content=r.document.content,
+            category=r.document.metadata.get("category", ""),
+            score=r.score,
+            rank=r.rank,
+            retrieval_stage=r.retrieval_stage,
+        )
+        for r in response.results
+    ]
+
+    return RetrievalQueryResponse(
+        query=query,
+        results=items,
+        total_candidates=response.total_candidates,
+        coarse_time_ms=round(response.coarse_time_ms, 3),
+        fine_time_ms=round(response.fine_time_ms, 3),
+        fusion_time_ms=round(response.fusion_time_ms, 3),
+    )
+
+
+@router.get("/retrieval/suggest", response_model=PromptSuggestionResponse)
+async def retrieval_suggest(
+    prompt: str = Query(..., min_length=1, description="Base prompt to get suggestions for"),
+    top_k: int = Query(default=5, ge=1, le=10, description="Number of knowledge items"),
+) -> PromptSuggestionResponse:
+    """
+    Get prompt improvement suggestions from the knowledge base.
+
+    Returns relevant knowledge and actionable tips to enhance the
+    given image-generation prompt.
+    """
+    kb = get_knowledge_base()
+    suggestions = await kb.get_prompt_suggestions(prompt, top_k=top_k)
+
+    return PromptSuggestionResponse(
+        original_prompt=suggestions["original_prompt"],
+        relevant_knowledge=suggestions["relevant_knowledge"],
+        enhancement_tips=suggestions["enhancement_tips"],
+    )

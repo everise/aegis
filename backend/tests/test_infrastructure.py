@@ -13,12 +13,17 @@ from app.services.dual_retrieval import (
     SemanticRetriever,
     Document,
     ImageGenerationKnowledgeBase,
+    tokenize,
+    reciprocal_rank_fusion,
 )
 from app.services.model_router import (
     ModelRouter,
     ModelEndpoint,
     ModelCapability,
     RoutingStrategy,
+    CircuitBreaker,
+    CircuitState,
+    RandomRouter,
     create_image_generation_router,
 )
 from app.services.governance import (
@@ -35,10 +40,62 @@ from app.services.governance import (
 
 # ============== Dual Retrieval Tests ==============
 
+class TestTokenizer:
+    """Tests for CJK-aware tokenizer."""
+
+    def test_english_tokenization(self):
+        """Test English text tokenization with stop-word removal."""
+        tokens = tokenize("The quick brown fox jumps over the lazy dog")
+        assert "quick" in tokens
+        assert "fox" in tokens
+        # Stop words should be removed
+        assert "the" not in tokens
+        assert "is" not in tokens
+
+    def test_chinese_tokenization(self):
+        """Test Chinese text is split into unigrams."""
+        tokens = tokenize("美丽的日落")
+        assert "美" in tokens
+        assert "丽" in tokens
+        assert "日" in tokens
+        assert "落" in tokens
+
+    def test_mixed_cjk_english(self):
+        """Test mixed Chinese-English tokenization."""
+        tokens = tokenize("8K分辨率 photorealistic style")
+        assert "分" in tokens
+        assert "辨" in tokens
+        assert "photorealistic" in tokens
+        assert "style" in tokens
+
+
+class TestRRF:
+    """Tests for Reciprocal Rank Fusion."""
+
+    def test_rrf_fusion(self):
+        """Test RRF correctly fuses two ranked lists."""
+        list1 = [("a", 10.0), ("b", 8.0), ("c", 5.0)]
+        list2 = [("b", 0.9), ("c", 0.8), ("d", 0.7)]
+        fused = reciprocal_rank_fusion([list1, list2], k=60)
+        ids = [doc_id for doc_id, _ in fused]
+        # "b" appears in both lists so should rank highest
+        assert ids[0] == "b"
+        assert "a" in ids
+        assert "d" in ids
+
+    def test_rrf_single_list(self):
+        """Test RRF with a single list."""
+        single = [("x", 5.0), ("y", 3.0)]
+        fused = reciprocal_rank_fusion([single], k=60)
+        assert fused[0][0] == "x"
+        assert fused[1][0] == "y"
+
+
 class TestBM25Retriever:
     """Tests for BM25Retriever."""
     
-    def test_add_and_retrieve(self):
+    @pytest.mark.asyncio
+    async def test_add_and_retrieve(self):
         """Test adding documents and retrieving."""
         retriever = BM25Retriever()
         
@@ -47,84 +104,165 @@ class TestBM25Retriever:
             Document(doc_id="2", content="The lazy dog sleeps"),
             Document(doc_id="3", content="Quick foxes are fast"),
         ]
-        retriever.add_documents(docs)
+        await retriever.add_documents(docs)
         
-        results = retriever.retrieve("quick fox", top_k=2)
+        results = await retriever.retrieve("quick fox", top_k=2)
         
         assert len(results) == 2
         # Documents with "quick" and "fox" should rank higher
         doc_ids = [doc.doc_id for doc, _ in results]
         assert "1" in doc_ids or "3" in doc_ids
     
-    def test_empty_query(self):
+    @pytest.mark.asyncio
+    async def test_empty_query(self):
         """Test retrieval with empty query."""
         retriever = BM25Retriever()
-        retriever.add_documents([Document(doc_id="1", content="test")])
+        await retriever.add_documents([Document(doc_id="1", content="test document")])
         
-        results = retriever.retrieve("", top_k=5)
+        results = await retriever.retrieve("", top_k=5)
         
         assert results == []
 
+    @pytest.mark.asyncio
+    async def test_remove_documents(self):
+        """Test removing documents from the index."""
+        retriever = BM25Retriever()
+        docs = [
+            Document(doc_id="1", content="first document"),
+            Document(doc_id="2", content="second document"),
+        ]
+        await retriever.add_documents(docs)
+        assert retriever.count() == 2
+
+        await retriever.remove_documents(["1"])
+        assert retriever.count() == 1
+
+        results = await retriever.retrieve("first", top_k=5)
+        assert len(results) == 0
+
+    @pytest.mark.asyncio
+    async def test_chinese_retrieval(self):
+        """Test BM25 retrieval with Chinese content."""
+        retriever = BM25Retriever()
+        docs = [
+            Document(doc_id="1", content="水墨画风格的山水"),
+            Document(doc_id="2", content="油画风格的肖像"),
+            Document(doc_id="3", content="动漫风格的角色"),
+        ]
+        await retriever.add_documents(docs)
+        results = await retriever.retrieve("水墨", top_k=2)
+        assert len(results) >= 1
+        assert results[0][0].doc_id == "1"
+
 
 class TestSemanticRetriever:
-    """Tests for SemanticRetriever."""
+    """Tests for SemanticRetriever (ChromaDB-backed)."""
     
-    def test_add_and_retrieve(self):
-        """Test semantic retrieval."""
-        retriever = SemanticRetriever()
+    @pytest.mark.asyncio
+    async def test_add_and_retrieve(self):
+        """Test semantic retrieval with real embeddings."""
+        retriever = SemanticRetriever()  # in-memory ChromaDB
         
         docs = [
             Document(doc_id="1", content="Machine learning algorithms"),
             Document(doc_id="2", content="Deep neural networks"),
-            Document(doc_id="3", content="Cooking recipes"),
+            Document(doc_id="3", content="Cooking recipes for dinner"),
         ]
-        retriever.add_documents(docs)
+        await retriever.add_documents(docs)
         
-        results = retriever.retrieve("artificial intelligence", top_k=2)
+        results = await retriever.retrieve("artificial intelligence", top_k=2)
         
         assert len(results) == 2
+        # ML/DL docs should rank higher than cooking
+        doc_ids = [doc.doc_id for doc, _ in results]
+        assert "3" not in doc_ids or doc_ids.index("3") > 0
+
+    @pytest.mark.asyncio
+    async def test_similarity_scores(self):
+        """Test that similarity scores are in [0, 1]."""
+        retriever = SemanticRetriever()
+        await retriever.add_documents([
+            Document(doc_id="1", content="Beautiful sunset over the ocean"),
+        ])
+        results = await retriever.retrieve("sunset", top_k=1)
+        assert len(results) == 1
+        _, score = results[0]
+        assert 0.0 <= score <= 1.0
 
 
 class TestDualLevelRetriever:
-    """Tests for DualLevelRetriever."""
+    """Tests for DualLevelRetriever (BM25 + Semantic + RRF)."""
     
-    def test_dual_retrieval(self):
-        """Test two-stage retrieval."""
-        retriever = DualLevelRetriever(coarse_k=10, fine_k=3)
+    @pytest.mark.asyncio
+    async def test_dual_retrieval(self):
+        """Test two-stage retrieval with RRF fusion."""
+        retriever = DualLevelRetriever(coarse_k=10, fine_k=10)
         
         docs = [
             Document(doc_id=f"doc-{i}", content=f"Document about topic {i}")
             for i in range(20)
         ]
-        retriever.add_documents(docs)
+        await retriever.add_documents(docs)
         
-        response = retriever.retrieve("topic", top_k=3)
+        response = await retriever.retrieve("topic", top_k=3)
         
         assert len(response.results) == 3
         assert response.coarse_time_ms >= 0
         assert response.fine_time_ms >= 0
+        assert response.fusion_time_ms >= 0
+        # Results should use RRF fusion stage
+        assert all(r.retrieval_stage == "rrf_fused" for r in response.results)
+
+    @pytest.mark.asyncio
+    async def test_empty_retrieval(self):
+        """Test retrieval with no documents."""
+        retriever = DualLevelRetriever()
+        response = await retriever.retrieve("anything", top_k=5)
+        assert len(response.results) == 0
+        assert response.total_candidates == 0
 
 
 class TestImageGenerationKnowledgeBase:
     """Tests for ImageGenerationKnowledgeBase."""
     
-    def test_query_knowledge(self):
+    @pytest.mark.asyncio
+    async def test_query_knowledge(self):
         """Test querying the knowledge base."""
         kb = ImageGenerationKnowledgeBase()
         
-        results = kb.query("how to improve image quality", top_k=3)
+        results = await kb.query("how to improve image quality", top_k=3)
         
         assert len(results) <= 3
         assert all(hasattr(r, 'document') for r in results)
     
-    def test_prompt_suggestions(self):
+    @pytest.mark.asyncio
+    async def test_prompt_suggestions(self):
         """Test getting prompt suggestions."""
         kb = ImageGenerationKnowledgeBase()
         
-        suggestions = kb.get_prompt_suggestions("a sunset over mountains")
+        suggestions = await kb.get_prompt_suggestions("a sunset over mountains")
         
         assert "original_prompt" in suggestions
         assert "relevant_knowledge" in suggestions
+        assert "enhancement_tips" in suggestions
+
+    @pytest.mark.asyncio
+    async def test_augmented_context(self):
+        """Test augmented context generation for planner."""
+        kb = ImageGenerationKnowledgeBase()
+
+        context = await kb.get_augmented_context("oil painting of a sunset")
+
+        assert "[Retrieved Knowledge]" in context
+        assert "[/Retrieved Knowledge]" in context
+
+    @pytest.mark.asyncio
+    async def test_chinese_query(self):
+        """Test knowledge base works with Chinese queries."""
+        kb = ImageGenerationKnowledgeBase()
+
+        results = await kb.query("如何提高图像质量", top_k=3)
+        assert len(results) >= 1
 
 
 # ============== Model Router Tests ==============
@@ -246,6 +384,95 @@ class TestCreateImageGenerationRouter:
         
         evaluation = router.list_endpoints(ModelCapability.EVALUATION)
         assert len(evaluation) > 0
+
+
+class TestCircuitBreaker:
+    """Tests for CircuitBreaker (closed → open → half-open → closed)."""
+
+    def test_initial_state_is_closed(self):
+        cb = CircuitBreaker()
+        assert cb.state == CircuitState.CLOSED
+        assert cb.allow_request()
+
+    def test_opens_after_threshold_failures(self):
+        cb = CircuitBreaker(failure_threshold=3)
+        for _ in range(3):
+            cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+        assert not cb.allow_request()
+
+    def test_half_open_after_recovery_timeout(self):
+        import time as _time
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.05)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+        _time.sleep(0.06)
+        assert cb.allow_request()  # transitions to HALF_OPEN
+        assert cb.state == CircuitState.HALF_OPEN
+
+    def test_half_open_success_closes_circuit(self):
+        import time as _time
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01)
+        cb.record_failure()
+        _time.sleep(0.02)
+        cb.allow_request()  # → HALF_OPEN
+        cb.record_success()
+        assert cb.state == CircuitState.CLOSED
+
+    def test_half_open_failure_reopens_circuit(self):
+        import time as _time
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01)
+        cb.record_failure()
+        _time.sleep(0.02)
+        cb.allow_request()  # → HALF_OPEN
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+
+    def test_reset(self):
+        cb = CircuitBreaker(failure_threshold=1)
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+        cb.reset()
+        assert cb.state == CircuitState.CLOSED
+        assert cb.consecutive_failures == 0
+
+
+class TestRandomRouter:
+    """Tests for RandomRouter."""
+
+    def test_returns_none_when_no_available(self):
+        rr = RandomRouter()
+        result = rr.select_endpoint([], ModelCapability.TEXT_TO_IMAGE)
+        assert result is None
+
+    def test_selects_from_available(self):
+        rr = RandomRouter()
+        ep = ModelEndpoint(
+            endpoint_id="r1", name="R1",
+            base_url="http://test",
+            capabilities=[ModelCapability.TEXT_TO_IMAGE],
+        )
+        result = rr.select_endpoint([ep], ModelCapability.TEXT_TO_IMAGE)
+        assert result is ep
+
+
+class TestCircuitBreakerIntegration:
+    """Test circuit breaker integrates with ModelEndpoint and ModelRouter."""
+
+    def test_endpoint_unavailable_when_circuit_open(self):
+        ep = ModelEndpoint(
+            endpoint_id="cb-test", name="CB",
+            base_url="http://test",
+            capabilities=[ModelCapability.TEXT_TO_IMAGE],
+        )
+        ep.circuit_breaker = CircuitBreaker(failure_threshold=2)
+        # record 2 failures to trip the breaker
+        ep.record_request(success=False, latency_ms=0)
+        ep.record_request(success=False, latency_ms=0)
+        assert ep.circuit_breaker.state == CircuitState.OPEN
+        assert not ep.is_available
+        assert not ep.can_handle(ModelCapability.TEXT_TO_IMAGE)
 
 
 # ============== Governance Tests ==============

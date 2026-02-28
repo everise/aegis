@@ -14,6 +14,7 @@ from enum import Enum
 
 from app.services.skill_executor import SkillExecutor, MockSkillExecutor, SkillResult, SkillStatus
 from app.services.planning.base import BasePlanningModel, ActionType, PlanningStep
+from app.services.dual_retrieval import get_knowledge_base
 
 
 @dataclass
@@ -105,6 +106,7 @@ class ReActPlanner:
         planning_model: Optional[BasePlanningModel] = None,
         max_steps: int = 10,
         use_mock: bool = True,
+        enable_retrieval: bool = True,
     ):
         # Use mock executor by default for development
         if use_mock and skill_executor is None:
@@ -116,11 +118,28 @@ class ReActPlanner:
         
         self.planning_model = planning_model
         self.max_steps = max_steps
+        self.enable_retrieval = enable_retrieval
         if planning_model:
             print(f"[DEBUG] ReActPlanner initialized with planning_model: {planning_model.info().name}")
         else:
             print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
     
+    async def _retrieve_knowledge(self, user_message: str) -> str:
+        """Retrieve relevant domain knowledge using Dual-Level Retrieval.
+
+        Uses BM25 + ChromaDB semantic search with RRF fusion to find
+        the most relevant prompting / style / quality knowledge.
+        """
+        if not self.enable_retrieval:
+            return ""
+        try:
+            kb = get_knowledge_base()
+            augmented = await kb.get_augmented_context(user_message, top_k=3)
+            return augmented
+        except Exception as e:
+            print(f"[WARN] Dual-Level Retrieval failed: {e}")
+            return ""
+
     async def _get_next_step(
         self,
         user_message: str,
@@ -185,15 +204,22 @@ class ReActPlanner:
         if self.planning_model is not None:
             self.planning_model.reset()
         
+        # Dual-Level Retrieval: augment with domain knowledge
+        retrieved_knowledge = await self._retrieve_knowledge(user_message)
+        if retrieved_knowledge:
+            augmented_message = f"{retrieved_knowledge}\n\n{user_message}"
+        else:
+            augmented_message = user_message
+        
         observation: Optional[Dict[str, Any]] = None
         step_number = 0
         
         while step_number < self.max_steps:
             step_number += 1
             
-            # Think: Get next step from planning model
+            # Think: Get next step from planning model (with retrieved knowledge)
             try:
-                react_step = await self._get_next_step(user_message, observation)
+                react_step = await self._get_next_step(augmented_message, observation)
             except Exception as e:
                 plan.status = PlanStatus.FAILED
                 plan.steps.append(PlanStep(
@@ -281,10 +307,28 @@ class ReActPlanner:
         if self.planning_model is not None:
             self.planning_model.reset()
         
+        # Dual-Level Retrieval: augment with domain knowledge
+        retrieved_knowledge = await self._retrieve_knowledge(user_message)
+        if retrieved_knowledge:
+            augmented_message = f"{retrieved_knowledge}\n\n{user_message}"
+        else:
+            augmented_message = user_message
+        
         yield {
             "type": "plan_started",
-            "data": {"user_message": user_message, "session_id": session_id},
+            "data": {
+                "user_message": user_message,
+                "session_id": session_id,
+                "knowledge_retrieved": bool(retrieved_knowledge),
+            },
         }
+        
+        # If retrieval found something, emit it
+        if retrieved_knowledge:
+            yield {
+                "type": "knowledge_retrieved",
+                "data": {"context": retrieved_knowledge},
+            }
         
         # Initial delay to simulate receiving and processing request
         await asyncio.sleep(random.uniform(1.0, 2.0))
@@ -305,7 +349,7 @@ class ReActPlanner:
             await asyncio.sleep(random.uniform(3.0, 5.0))
             
             try:
-                react_step = await self._get_next_step(user_message, observation)
+                react_step = await self._get_next_step(augmented_message, observation)
             except Exception as e:
                 yield {
                     "type": "error",

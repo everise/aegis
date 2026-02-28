@@ -44,3 +44,15 @@ memory:
 vector:
   chroma_persist_dir: "data/chroma_db"
   max_context_tokens: 128000
+
+# ── 双层检索设置 (Dual-Level Retrieval) ─────
+retrieval:
+  enabled: true             # 启用 / 禁用 检索增强
+  coarse_k: 50              # BM25 粗检索候选数
+  fine_k: 50                # 语义精排候选数
+  rrf_k: 60                 # RRF 平滑常数 (默认 60)
+  top_k: 3                  # 注入上下文的最终结果数
+
+
+opentouter:
+  api_key: "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"
