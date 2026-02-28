@@ -31,6 +31,7 @@ from app.services.sse_manager import (
     stream_plan_execution,
 )
 from app.services.vector_context import get_vector_context_manager
+from app.services.memory_manager import get_memory_manager
 
 
 router = APIRouter()
@@ -122,6 +123,13 @@ async def create_message(
     except Exception as e:
         # Non-critical: log but don't fail the request
         print(f"Warning: Failed to store message in vector context: {e}")
+    
+    # Store in working memory (auto-compresses when over token limit)
+    try:
+        mm = get_memory_manager()
+        await mm.add_db_message(message)
+    except Exception as e:
+        print(f"Warning: Failed to store message in working memory: {e}")
     
     return MessageResponse(
         id=message.id,
@@ -264,6 +272,13 @@ async def chat(
     except Exception as e:
         print(f"Warning: Failed to store message in vector context: {e}")
     
+    # Store in working memory
+    try:
+        mm = get_memory_manager()
+        await mm.add_db_message(user_message)
+    except Exception as e:
+        print(f"Warning: Failed to store message in working memory: {e}")
+    
     # Execute ReAct planning — use the active planning model
     registry = get_planning_registry()
     active_model = registry.get_active_model()
@@ -301,6 +316,13 @@ async def chat(
         )
     except Exception as e:
         print(f"Warning: Failed to store message in vector context: {e}")
+    
+    # Store in working memory
+    try:
+        mm = get_memory_manager()
+        await mm.add_db_message(assistant_message)
+    except Exception as e:
+        print(f"Warning: Failed to store assistant message in working memory: {e}")
     
     return PlanResponse(
         message_id=assistant_message.id,
@@ -355,6 +377,13 @@ async def chat_stream(
     except Exception as e:
         print(f"Warning: Failed to store message in vector context: {e}")
     
+    # Store in working memory
+    try:
+        mm = get_memory_manager()
+        await mm.add_db_message(user_message)
+    except Exception as e:
+        print(f"Warning: Failed to store user message in working memory: {e}")
+    
     # Shared state for collecting events
     collected_steps: list = []
     final_result_holder: dict = {"result": None}
@@ -397,6 +426,13 @@ async def chat_stream(
                     )
                 except Exception as vc_error:
                     print(f"Warning: Failed to store assistant message in vector context: {vc_error}")
+                
+                # Store in working memory
+                try:
+                    mm = get_memory_manager()
+                    await mm.add_db_message(assistant_message)
+                except Exception as mem_error:
+                    print(f"Warning: Failed to store assistant message in working memory: {mem_error}")
                 
                 print(f"Saved assistant message for session {session_id}")
         except Exception as save_error:

@@ -41,6 +41,24 @@ class Settings(BaseSettings):
     # SSE settings
     sse_ping_interval: int = Field(default=30, description="SSE ping interval in seconds")
     
+    # Memory compression settings
+    memory_max_tokens: int = Field(
+        default=32000,
+        description="Max tokens per session working memory before compression triggers"
+    )
+    memory_compress_on_add: bool = Field(
+        default=True,
+        description="Check and compress memory when adding messages"
+    )
+    memory_compress_on_get: bool = Field(
+        default=True,
+        description="Check and compress memory when retrieving context"
+    )
+    memory_protected_pairs: int = Field(
+        default=2,
+        description="Number of recent user-assistant pairs protected from compression"
+    )
+    
     @field_validator("port")
     @classmethod
     def validate_port(cls, v: int) -> int:

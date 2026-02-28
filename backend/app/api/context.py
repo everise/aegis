@@ -1,8 +1,9 @@
 """
 Context API endpoints.
 
-Provides endpoints for querying vector context statistics
-and performing semantic search over conversation history.
+Provides endpoints for querying vector context statistics,
+performing semantic search over conversation history, and
+inspecting working memory compression state.
 """
 
 from typing import List, Optional
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.vector_context import get_vector_context_manager, ContextStats
+from app.services.memory_manager import get_memory_manager
 
 
 router = APIRouter()
@@ -119,8 +121,113 @@ async def delete_session_context(session_id: int):
     vcm = get_vector_context_manager()
     deleted = vcm.delete_session_context(session_id)
     
+    # Also clean up working memory
+    mm = get_memory_manager()
+    mm.delete_session(session_id)
+    
     return {
         "session_id": session_id,
         "deleted": deleted,
         "message": f"Context for session {session_id} {'deleted' if deleted else 'not found'}",
+    }
+
+
+# ── Working Memory endpoints ─────────────────────────────────────
+
+class MemoryStatsResponse(BaseModel):
+    """Response model for working memory statistics."""
+    session_id: int
+    message_count: int
+    compressed_count: int
+    total_tokens: int
+    max_tokens: int
+    usage_ratio: float
+    image_url_count: int
+    compression_count: int
+
+
+class MemoryMessageResponse(BaseModel):
+    """A single message in working memory."""
+    role: str
+    content: str
+    is_compressed: bool = False
+    original_count: int = 1
+    image_urls: List[str] = []
+    quality_score: Optional[float] = None
+    token_estimate: int = 0
+
+
+class MemoryContextResponse(BaseModel):
+    """Response for working memory context."""
+    session_id: int
+    messages: List[MemoryMessageResponse]
+    total_tokens: int
+    is_compressed: bool
+
+
+@router.get("/{session_id}/memory/stats", response_model=MemoryStatsResponse)
+async def get_memory_stats(session_id: int) -> MemoryStatsResponse:
+    """
+    Get working memory statistics for a session.
+    
+    Returns compression state, token usage, and capacity information
+    for the in-memory context window.
+    """
+    mm = get_memory_manager()
+    stats = mm.get_stats(session_id)
+    return MemoryStatsResponse(
+        session_id=stats.session_id,
+        message_count=stats.message_count,
+        compressed_count=stats.compressed_count,
+        total_tokens=stats.total_tokens,
+        max_tokens=stats.max_tokens,
+        usage_ratio=stats.usage_ratio,
+        image_url_count=stats.image_url_count,
+        compression_count=stats.compression_count,
+    )
+
+
+@router.get("/{session_id}/memory/context", response_model=MemoryContextResponse)
+async def get_memory_context(session_id: int) -> MemoryContextResponse:
+    """
+    Get the current working memory context for a session.
+    
+    Returns the (potentially compressed) message list that would
+    be sent to the planning model.
+    """
+    mm = get_memory_manager()
+    mem = mm.get_session_memory(session_id)
+    messages = await mem.get_context()
+    
+    total_tokens = sum(m.token_estimate or 0 for m in messages)
+    has_compressed = any(m.is_compressed for m in messages)
+    
+    return MemoryContextResponse(
+        session_id=session_id,
+        messages=[
+            MemoryMessageResponse(
+                role=m.role.value,
+                content=m.content,
+                is_compressed=m.is_compressed,
+                original_count=m.original_count,
+                image_urls=m.image_urls,
+                quality_score=m.quality_score,
+                token_estimate=m.token_estimate,
+            )
+            for m in messages
+        ],
+        total_tokens=total_tokens,
+        is_compressed=has_compressed,
+    )
+
+
+@router.delete("/{session_id}/memory")
+async def clear_memory(session_id: int):
+    """Clear working memory for a session (does not affect SQLite or vector DB)."""
+    mm = get_memory_manager()
+    mem = mm.get_session_memory(session_id)
+    await mem.clear()
+    return {
+        "session_id": session_id,
+        "message": "Working memory cleared",
     }
