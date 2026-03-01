@@ -21,9 +21,6 @@ from app.services.model_router import (
     ModelEndpoint,
     ModelCapability,
     RoutingStrategy,
-    CircuitBreaker,
-    CircuitState,
-    RandomRouter,
     create_image_generation_router,
 )
 from app.services.governance import (
@@ -384,95 +381,6 @@ class TestCreateImageGenerationRouter:
         
         evaluation = router.list_endpoints(ModelCapability.EVALUATION)
         assert len(evaluation) > 0
-
-
-class TestCircuitBreaker:
-    """Tests for CircuitBreaker (closed → open → half-open → closed)."""
-
-    def test_initial_state_is_closed(self):
-        cb = CircuitBreaker()
-        assert cb.state == CircuitState.CLOSED
-        assert cb.allow_request()
-
-    def test_opens_after_threshold_failures(self):
-        cb = CircuitBreaker(failure_threshold=3)
-        for _ in range(3):
-            cb.record_failure()
-        assert cb.state == CircuitState.OPEN
-        assert not cb.allow_request()
-
-    def test_half_open_after_recovery_timeout(self):
-        import time as _time
-        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.05)
-        cb.record_failure()
-        cb.record_failure()
-        assert cb.state == CircuitState.OPEN
-        _time.sleep(0.06)
-        assert cb.allow_request()  # transitions to HALF_OPEN
-        assert cb.state == CircuitState.HALF_OPEN
-
-    def test_half_open_success_closes_circuit(self):
-        import time as _time
-        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01)
-        cb.record_failure()
-        _time.sleep(0.02)
-        cb.allow_request()  # → HALF_OPEN
-        cb.record_success()
-        assert cb.state == CircuitState.CLOSED
-
-    def test_half_open_failure_reopens_circuit(self):
-        import time as _time
-        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01)
-        cb.record_failure()
-        _time.sleep(0.02)
-        cb.allow_request()  # → HALF_OPEN
-        cb.record_failure()
-        assert cb.state == CircuitState.OPEN
-
-    def test_reset(self):
-        cb = CircuitBreaker(failure_threshold=1)
-        cb.record_failure()
-        assert cb.state == CircuitState.OPEN
-        cb.reset()
-        assert cb.state == CircuitState.CLOSED
-        assert cb.consecutive_failures == 0
-
-
-class TestRandomRouter:
-    """Tests for RandomRouter."""
-
-    def test_returns_none_when_no_available(self):
-        rr = RandomRouter()
-        result = rr.select_endpoint([], ModelCapability.TEXT_TO_IMAGE)
-        assert result is None
-
-    def test_selects_from_available(self):
-        rr = RandomRouter()
-        ep = ModelEndpoint(
-            endpoint_id="r1", name="R1",
-            base_url="http://test",
-            capabilities=[ModelCapability.TEXT_TO_IMAGE],
-        )
-        result = rr.select_endpoint([ep], ModelCapability.TEXT_TO_IMAGE)
-        assert result is ep
-
-
-class TestCircuitBreakerIntegration:
-    """Test circuit breaker integrates with ModelEndpoint and ModelRouter."""
-
-    def test_endpoint_unavailable_when_circuit_open(self):
-        ep = ModelEndpoint(
-            endpoint_id="cb-test", name="CB",
-            base_url="http://test",
-            capabilities=[ModelCapability.TEXT_TO_IMAGE],
-        )
-        ep.circuit_breaker = CircuitBreaker(failure_threshold=2)
-        # record 2 failures to trip the breaker
-        ep.record_request(success=False, latency_ms=0)
-        ep.record_request(success=False, latency_ms=0)
-        assert ep.circuit_breaker.state == CircuitState.OPEN
-        assert not ep.is_available
-        assert not ep.can_handle(ModelCapability.TEXT_TO_IMAGE)
 
 
 # ============== Governance Tests ==============

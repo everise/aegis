@@ -7,7 +7,6 @@ iterative task completion with skill execution.
 
 import asyncio
 import json
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncIterator
@@ -16,8 +15,6 @@ from enum import Enum
 from app.services.skill_executor import SkillExecutor, MockSkillExecutor, SkillResult, SkillStatus
 from app.services.planning.base import BasePlanningModel, ActionType, PlanningStep
 from app.services.dual_retrieval import get_knowledge_base
-
-logger = logging.getLogger("aegis.planner")
 
 
 @dataclass
@@ -123,9 +120,9 @@ class ReActPlanner:
         self.max_steps = max_steps
         self.enable_retrieval = enable_retrieval
         if planning_model:
-            logger.info("ReActPlanner initialised with planning_model: %s", planning_model.info().name)
+            print(f"[DEBUG] ReActPlanner initialized with planning_model: {planning_model.info().name}")
         else:
-            logger.info("ReActPlanner initialised with skill_executor: %s", type(self.skill_executor).__name__)
+            print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
     
     async def _retrieve_knowledge(self, user_message: str) -> str:
         """Retrieve relevant domain knowledge using Dual-Level Retrieval.
@@ -152,10 +149,7 @@ class ReActPlanner:
         if self.planning_model is None:
             raise RuntimeError("No planning model configured for ReActPlanner")
 
-        logger.debug("Requesting next step from %s  observation=%s",
-                     self.planning_model.info().name, observation is not None)
         step = await self.planning_model.get_next_step(user_message, observation)
-        logger.info("Got step: action=%s  thought=%.80s…", step.action.value, step.thought)
         return ReActStep(
             thought=step.thought,
             action=ActionType(step.action.value),
@@ -357,7 +351,6 @@ class ReActPlanner:
             try:
                 react_step = await self._get_next_step(augmented_message, observation)
             except Exception as e:
-                logger.error("Planning step failed at step %d: %s", step_number, e, exc_info=True)
                 yield {
                     "type": "error",
                     "data": {"step_number": step_number, "error": str(e)},
