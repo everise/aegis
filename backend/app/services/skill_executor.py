@@ -3,18 +3,25 @@ Skill executor for HTTP API-based skills.
 
 Implements the submit-poll pattern for async skill executions.
 Manages skill lifecycle and result handling.
+
+Also provides ``OpenRouterSkillExecutor`` which delegates to the
+real OpenRouter skill implementations (text_to_image, evaluate_image,
+repair_image) instead of simulating via the mock remote API.
 """
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 from enum import Enum
 
 import httpx
 from pydantic import BaseModel
 
 from app.config import get_settings
+
+logger = logging.getLogger("aegis.skill_executor")
 
 
 class SkillStatus(str, Enum):
@@ -328,7 +335,7 @@ class SkillExecutor:
         skill = self.get_skill(skill_name)
         return await skill.execute(params)
     
-    def list_skills(self) -> list[Dict[str, str]]:
+    def list_skills(self) -> List[Dict[str, str]]:
         """List all available skills."""
         return [
             {"name": name, "description": cls.description}
@@ -418,7 +425,7 @@ class MockSkillExecutor:
                 error=f"Unknown skill: {skill_name}",
             )
     
-    def list_skills(self) -> list[Dict[str, str]]:
+    def list_skills(self) -> List[Dict[str, str]]:
         """List all available skills."""
         return [
             {"name": name, "description": cls.description}
@@ -428,3 +435,168 @@ class MockSkillExecutor:
     async def close(self):
         """No resources to close."""
         pass
+
+
+class OpenRouterSkillExecutor:
+    """Skill executor that delegates to real OpenRouter skill implementations.
+
+    When the active planning model is OpenRouter, this executor is used
+    instead of ``MockSkillExecutor`` or ``SkillExecutor`` so that
+    text-to-image generation, image evaluation, and image repair all
+    go through the OpenRouter API with the models configured in
+    ``aegis.yaml → openrouter``.
+    """
+
+    def __init__(self) -> None:
+        # Lazily instantiated on first call to avoid import-time side effects
+        self._generator: Optional[Any] = None
+        self._scorer: Optional[Any] = None
+        self._repairer: Optional[Any] = None
+        self._initialised = False
+        # Accumulated actual API token usage across all skill calls
+        self._accumulated_usage: Dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @property
+    def token_usage(self) -> Dict[str, int]:
+        """Return accumulated actual API token usage for skill calls."""
+        return dict(self._accumulated_usage)
+
+    def _accumulate_usage(self, usage: Dict[str, Any]) -> None:
+        """Add usage from an OpenRouter response to the running total."""
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            val = usage.get(key)
+            if val is not None:
+                self._accumulated_usage[key] += int(val)
+
+    def _ensure_initialised(self) -> None:
+        """Import and create the three OpenRouter skill backends."""
+        if self._initialised:
+            return
+
+        from skills.text_to_image.scripts.openrouter import OpenRouterImageGenerator
+        from skills.evaluate_image.scripts.openrouter import OpenRouterVLScorer
+        from skills.repair_image.scripts.openrouter import OpenRouterImageRepairer
+
+        self._generator = OpenRouterImageGenerator()
+        self._scorer = OpenRouterVLScorer()
+        self._repairer = OpenRouterImageRepairer()
+        self._initialised = True
+        logger.info("OpenRouterSkillExecutor initialised (generator + scorer + repairer)")
+
+    async def execute(self, skill_name: str, params: Dict[str, Any]) -> SkillResult:
+        """Execute a skill via OpenRouter.
+
+        Maps the canonical skill names (``text_to_image``,
+        ``evaluate_image``, ``repair_image``) to the corresponding
+        OpenRouter skill class and calls its async method.
+        """
+        self._ensure_initialised()
+
+        try:
+            if skill_name == "text_to_image":
+                raw = await self._generator.generate(
+                    prompt=params.get("prompt", ""),
+                    aspect_ratio=params.get("aspect_ratio", "1:1"),
+                    image_size=params.get("image_size", "1K"),
+                    reference_image_url=params.get("reference_image_url"),
+                )
+                # Accumulate actual API token usage
+                if raw.get("usage"):
+                    self._accumulate_usage(raw["usage"])
+                # Normalise to the SkillResult format expected by the planner
+                error = raw.get("error")
+                return SkillResult(
+                    skill_name=skill_name,
+                    status=SkillStatus.FAILED if error else SkillStatus.COMPLETED,
+                    task_id=None,
+                    result={
+                        "image_url": raw.get("image_url"),
+                        "width": raw.get("width"),
+                        "height": raw.get("height"),
+                        "seed": None,
+                    } if not error else None,
+                    error=error,
+                    completed_at=datetime.utcnow(),
+                )
+
+            elif skill_name == "evaluate_image":
+                raw = await self._scorer.evaluate(
+                    image_url=params.get("image_url", ""),
+                    prompt=params.get("prompt", ""),
+                    criteria=params.get("criteria"),
+                )
+                # Accumulate actual API token usage
+                if raw.get("usage"):
+                    self._accumulate_usage(raw["usage"])
+                return SkillResult(
+                    skill_name=skill_name,
+                    status=SkillStatus.COMPLETED,
+                    task_id=None,
+                    result={
+                        "scores": raw.get("scores", {}),
+                        "overall_score": raw.get("overall_score"),
+                        "feedback": raw.get("feedback", ""),
+                    },
+                    completed_at=datetime.utcnow(),
+                )
+
+            elif skill_name == "repair_image":
+                raw = await self._repairer.repair(
+                    image_url=params.get("image_url", ""),
+                    prompt=params.get("prompt", ""),
+                    mask_url=params.get("mask_url"),
+                    strength=float(params.get("strength", 0.75)),
+                )
+                # Accumulate actual API token usage
+                if raw.get("usage"):
+                    self._accumulate_usage(raw["usage"])
+                error = raw.get("error")
+                return SkillResult(
+                    skill_name=skill_name,
+                    status=SkillStatus.FAILED if error else SkillStatus.COMPLETED,
+                    task_id=None,
+                    result={
+                        "image_url": raw.get("image_url"),
+                        "original_url": raw.get("original_url"),
+                    } if not error else None,
+                    error=error,
+                    completed_at=datetime.utcnow(),
+                )
+
+            else:
+                return SkillResult(
+                    skill_name=skill_name,
+                    status=SkillStatus.FAILED,
+                    error=f"Unknown skill for OpenRouter executor: {skill_name}",
+                )
+
+        except Exception as exc:
+            logger.exception("OpenRouterSkillExecutor error on skill=%s", skill_name)
+            return SkillResult(
+                skill_name=skill_name,
+                status=SkillStatus.FAILED,
+                error=f"OpenRouter skill error: {exc}",
+                completed_at=datetime.utcnow(),
+            )
+
+    def list_skills(self) -> List[Dict[str, str]]:
+        """List all available skills."""
+        return [
+            {"name": "text_to_image", "description": "Generate an image via OpenRouter"},
+            {"name": "evaluate_image", "description": "Evaluate image quality via OpenRouter VL model"},
+            {"name": "repair_image", "description": "Repair / improve an image via OpenRouter"},
+        ]
+
+    async def close(self) -> None:
+        """Release HTTP resources held by the underlying clients."""
+        for backend in (self._generator, self._scorer, self._repairer):
+            if backend is not None:
+                try:
+                    await backend.close()
+                except Exception:
+                    pass
+        self._initialised = False

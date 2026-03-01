@@ -142,7 +142,16 @@ class BasePlanningModel(ABC):
         """
         Stream the next ReAct step token-by-token.
 
-        Used for SSE streaming to the frontend.
+        Used for SSE streaming to the frontend.  Implementations must
+        yield raw content tokens (for typewriter display) and, as the
+        **very last yield**, a sentinel string that starts with
+        ``\\x00`` followed by the JSON-encoded parsed step::
+
+            yield "\\x00" + json.dumps({
+                "thought": ...,
+                "action": ...,
+                "action_input": ...,
+            })
         """
         ...
         # Must be an async generator; yield is required for type-checking

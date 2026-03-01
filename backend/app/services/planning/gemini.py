@@ -149,13 +149,16 @@ class GeminiPlanningModel(BasePlanningModel):
         observation: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
         step = await self.get_next_step(user_message, observation)
-        yield "thought:"
+        # Simulate word-by-word streaming for typewriter effect
         for word in step.thought.split():
             await asyncio.sleep(0.04)
-            yield f" {word}"
-        yield "\n"
-        yield f"action: {step.action.value}\n"
-        yield f"action_input: {json.dumps(step.action_input)}\n"
+            yield f"{word} "
+        # Sentinel with parsed step data
+        yield "\x00" + json.dumps({
+            "thought": step.thought,
+            "action": step.action.value,
+            "action_input": step.action_input,
+        }, ensure_ascii=False)
 
     # ── Private helpers ───────────────────────────────────────────
 

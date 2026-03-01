@@ -12,6 +12,13 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# Ensure the project root (parent of backend/) is on sys.path so that
+# top-level packages like ``skills`` can be imported from within the
+# FastAPI app (which is launched with cwd=backend/).
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
@@ -144,6 +151,11 @@ def register_routes(app: FastAPI) -> None:
 
 def register_static_files(app: FastAPI) -> None:
     """Register static file serving for frontend."""
+    # Mount generated images directory so the frontend can fetch them
+    images_dir = Path("data/images")
+    images_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/data/images", StaticFiles(directory=str(images_dir)), name="images")
+
     if not FRONTEND_DIST_DIR.exists():
         return  # Frontend not built yet
     

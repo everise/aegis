@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncIterator
 from enum import Enum
 
-from app.services.skill_executor import SkillExecutor, MockSkillExecutor, SkillResult, SkillStatus
+from app.services.skill_executor import SkillExecutor, MockSkillExecutor, OpenRouterSkillExecutor, SkillResult, SkillStatus
 from app.services.planning.base import BasePlanningModel, ActionType, PlanningStep
 from app.services.dual_retrieval import get_knowledge_base
 
@@ -108,11 +108,16 @@ class ReActPlanner:
         use_mock: bool = True,
         enable_retrieval: bool = True,
     ):
-        # Use mock executor by default for development
-        if use_mock and skill_executor is None:
-            self.skill_executor = MockSkillExecutor()
-        elif skill_executor is not None:
+        # Determine the best skill executor:
+        #   1. Explicit skill_executor argument wins.
+        #   2. If the planning model is OpenRouter → use OpenRouterSkillExecutor.
+        #   3. Fallback to MockSkillExecutor (use_mock=True) or SkillExecutor.
+        if skill_executor is not None:
             self.skill_executor = skill_executor
+        elif planning_model is not None and getattr(planning_model.info(), "id", "") == "openrouter":
+            self.skill_executor = OpenRouterSkillExecutor()
+        elif use_mock:
+            self.skill_executor = MockSkillExecutor()
         else:
             self.skill_executor = SkillExecutor()
         
@@ -120,7 +125,7 @@ class ReActPlanner:
         self.max_steps = max_steps
         self.enable_retrieval = enable_retrieval
         if planning_model:
-            print(f"[DEBUG] ReActPlanner initialized with planning_model: {planning_model.info().name}")
+            print(f"[DEBUG] ReActPlanner initialized with planning_model: {planning_model.info().name}  skill_executor: {type(self.skill_executor).__name__}")
         else:
             print(f"[DEBUG] ReActPlanner initialized with skill_executor: {type(self.skill_executor).__name__}")
     
@@ -140,20 +145,41 @@ class ReActPlanner:
             print(f"[WARN] Dual-Level Retrieval failed: {e}")
             return ""
 
+    async def _get_next_step_stream(
+        self,
+        user_message: str,
+        observation: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """Stream the next reasoning step from the planning model.
+
+        Yields raw token deltas.  The final yield is a sentinel
+        ``\\x00`` + JSON with the parsed ReAct step.
+        """
+        if self.planning_model is None:
+            raise RuntimeError("No planning model configured for ReActPlanner")
+        async for token in self.planning_model.get_next_step_stream(user_message, observation):
+            yield token
+
     async def _get_next_step(
         self,
         user_message: str,
         observation: Optional[Dict[str, Any]] = None,
     ) -> ReActStep:
-        """Get the next reasoning step from the planning model."""
-        if self.planning_model is None:
-            raise RuntimeError("No planning model configured for ReActPlanner")
+        """Get the next reasoning step (non-streaming convenience wrapper).
 
-        step = await self.planning_model.get_next_step(user_message, observation)
+        Internally consumes the streaming helper and parses the final
+        sentinel to return a complete ``ReActStep``.
+        """
+        parsed: Optional[dict] = None
+        async for token in self._get_next_step_stream(user_message, observation):
+            if token.startswith("\x00"):
+                parsed = json.loads(token[1:])
+        if parsed is None:
+            raise RuntimeError("Planning model stream ended without a parsed step")
         return ReActStep(
-            thought=step.thought,
-            action=ActionType(step.action.value),
-            action_input=step.action_input,
+            thought=parsed.get("thought", ""),
+            action=ActionType(parsed.get("action", "finish")),
+            action_input=parsed.get("action_input", {}),
         )
     
     async def _execute_action(
@@ -290,30 +316,39 @@ class ReActPlanner:
         self,
         user_message: str,
         session_id: Optional[int] = None,
+        *,
+        image_config: Optional[Dict[str, str]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Execute planning with streaming updates.
-        
+
         Yields status updates for each step of the planning process.
         Used for real-time UI updates via SSE.
+
+        The ``thought_delta`` events carry incremental token chunks so
+        the frontend can render a typewriter effect.  Once the full
+        response has been streamed, a ``thought`` event with the parsed
+        action / action_input is emitted.
+
+        *image_config* (optional): ``{"aspect_ratio": "...", "image_size": "..."}``
+        overrides that are merged into ``text_to_image`` skill params so
+        the user's UI selections are always applied.
         """
-        import random
-        
         plan = ExecutionPlan(
             session_id=session_id,
             user_message=user_message,
         )
-        
+
         if self.planning_model is not None:
             self.planning_model.reset()
-        
+
         # Dual-Level Retrieval: augment with domain knowledge
         retrieved_knowledge = await self._retrieve_knowledge(user_message)
         if retrieved_knowledge:
             augmented_message = f"{retrieved_knowledge}\n\n{user_message}"
         else:
             augmented_message = user_message
-        
+
         yield {
             "type": "plan_started",
             "data": {
@@ -322,44 +357,58 @@ class ReActPlanner:
                 "knowledge_retrieved": bool(retrieved_knowledge),
             },
         }
-        
+
         # If retrieval found something, emit it
         if retrieved_knowledge:
             yield {
                 "type": "knowledge_retrieved",
                 "data": {"context": retrieved_knowledge},
             }
-        
-        # Initial delay to simulate receiving and processing request
-        await asyncio.sleep(random.uniform(1.0, 2.0))
-        
+
         observation: Optional[Dict[str, Any]] = None
         step_number = 0
-        
+
         while step_number < self.max_steps:
             step_number += 1
-            
-            # Thinking phase - simulate LLM thinking time
+
+            # Thinking phase
             yield {
                 "type": "thinking",
                 "data": {"step_number": step_number},
             }
-            
-            # Simulate thinking delay (3-5 seconds)
-            await asyncio.sleep(random.uniform(3.0, 5.0))
-            
+
             try:
-                react_step = await self._get_next_step(augmented_message, observation)
+                # Stream tokens from the planning model
+                parsed_step: Optional[dict] = None
+                async for token in self._get_next_step_stream(augmented_message, observation):
+                    if token.startswith("\x00"):
+                        # Sentinel: parsed step data
+                        parsed_step = json.loads(token[1:])
+                    else:
+                        # Raw token delta -> push to frontend for typewriter
+                        yield {
+                            "type": "thought_delta",
+                            "data": {
+                                "step_number": step_number,
+                                "delta": token,
+                            },
+                        }
+
+                if parsed_step is None:
+                    raise RuntimeError("Planning model stream ended without parsed step")
+
+                react_step = ReActStep(
+                    thought=parsed_step.get("thought", ""),
+                    action=ActionType(parsed_step.get("action", "finish")),
+                    action_input=parsed_step.get("action_input", {}),
+                )
             except Exception as e:
                 yield {
                     "type": "error",
                     "data": {"step_number": step_number, "error": str(e)},
                 }
                 break
-            
-            # Small delay before showing thought result
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-            
+
             yield {
                 "type": "thought",
                 "data": {
@@ -369,19 +418,22 @@ class ReActPlanner:
                     "action_input": react_step.action_input,
                 },
             }
-            
+
             # Check finish
             if react_step.action == ActionType.FINISH:
-                await asyncio.sleep(random.uniform(0.5, 1.0))
                 yield {
                     "type": "finished",
                     "data": {"result": react_step.action_input},
                 }
                 break
-            
-            # Executing phase - delay before starting execution
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-            
+
+            # Merge user image config into text_to_image params
+            if image_config and react_step.action_input.get("skill") == "text_to_image":
+                params = react_step.action_input.get("params", {})
+                params["aspect_ratio"] = image_config.get("aspect_ratio", params.get("aspect_ratio", "1:1"))
+                params["image_size"] = image_config.get("image_size", params.get("image_size", "1K"))
+                react_step.action_input["params"] = params
+
             yield {
                 "type": "executing",
                 "data": {
@@ -389,16 +441,13 @@ class ReActPlanner:
                     "skill": react_step.action_input.get("skill"),
                 },
             }
-            
+
             try:
                 observation = await self._execute_action(
                     react_step.action,
                     react_step.action_input,
                 )
-                
-                # Small delay before showing observation
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-                
+
                 yield {
                     "type": "observation",
                     "data": {
@@ -406,27 +455,27 @@ class ReActPlanner:
                         "observation": observation,
                     },
                 }
-                
+
                 if observation.get("error") and observation.get("status") == SkillStatus.FAILED.value:
                     yield {
                         "type": "error",
                         "data": {"step_number": step_number, "error": observation["error"]},
                     }
                     break
-                    
+
             except Exception as e:
                 yield {
                     "type": "error",
                     "data": {"step_number": step_number, "error": str(e)},
                 }
                 break
-        
+
         if step_number >= self.max_steps:
             yield {
                 "type": "max_steps_reached",
                 "data": {"max_steps": self.max_steps},
             }
-    
+
     async def close(self):
         """Clean up resources."""
         await self.skill_executor.close()

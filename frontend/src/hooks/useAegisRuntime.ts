@@ -62,6 +62,13 @@ export interface MemoryStatsEvent {
   image_url_count: number;
 }
 
+/** SSE `api_token_usage` payload — actual API tokens from OpenRouter */
+export interface ApiTokenUsageEvent {
+  planning: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  skills: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  total: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}
+
 // Session state for managing multiple concurrent sessions
 interface SessionState {
   eventSource: EventSource | null;
@@ -76,6 +83,7 @@ interface SessionState {
   // Memory compression events
   compressionEvent: CompressionEvent | null;
   memoryStatsEvent: MemoryStatsEvent | null;
+  apiTokenUsage: ApiTokenUsageEvent | null;
 }
 
 // Global session state manager (persists across component re-renders)
@@ -146,6 +154,10 @@ export function getMemoryStatsEvent(sessionId: number): MemoryStatsEvent | null 
   return sessionStates.get(sessionId)?.memoryStatsEvent ?? null;
 }
 
+export function getApiTokenUsage(sessionId: number): ApiTokenUsageEvent | null {
+  return sessionStates.get(sessionId)?.apiTokenUsage ?? null;
+}
+
 export function isSessionRunning(sessionId: number): boolean {
   return sessionStates.get(sessionId)?.isRunning ?? false;
 }
@@ -156,6 +168,23 @@ export function getRunningSessionIds(): number[] {
     if (state.isRunning) running.push(id);
   });
   return running;
+}
+
+// ── Image config global state ───────────────────────────────────
+let _imageAspectRatio = "1:1";
+let _imageSize = "1K";
+
+export function setImageAspectRatio(ratio: string) {
+  _imageAspectRatio = ratio;
+}
+export function setImageSize(size: string) {
+  _imageSize = size;
+}
+export function getImageAspectRatio(): string {
+  return _imageAspectRatio;
+}
+export function getImageSize(): string {
+  return _imageSize;
 }
 
 function getSessionState(sessionId: number): SessionState {
@@ -171,6 +200,7 @@ function getSessionState(sessionId: number): SessionState {
       branchGroups: new Map(),
       compressionEvent: null,
       memoryStatsEvent: null,
+      apiTokenUsage: null,
     });
   }
   return sessionStates.get(sessionId)!;
@@ -454,9 +484,11 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
         setMessages((prev) => [...prev, userMessage]);
         state.messages = [...state.messages, userMessage];
 
-        // Call streaming chat endpoint
+        // Call streaming chat endpoint (include image config)
+        const ar = encodeURIComponent(getImageAspectRatio());
+        const sz = encodeURIComponent(getImageSize());
         const eventSource = new EventSource(
-          `${API_BASE_URL}/${sid}/chat/stream?message=${encodeURIComponent(textContent)}`
+          `${API_BASE_URL}/${sid}/chat/stream?message=${encodeURIComponent(textContent)}&aspect_ratio=${ar}&image_size=${sz}`
         );
         state.eventSource = eventSource;
 
@@ -520,6 +552,16 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
 
             if (data.type === "thinking") {
               state.currentThinkingText = "🤔 Thinking...";
+              updateMessages();
+            } else if (data.type === "thought_delta") {
+              // Incremental token from the LLM — typewriter effect
+              const delta: string = data.data?.delta ?? "";
+              if (state.currentThinkingText === "🤔 Thinking...") {
+                // Replace placeholder with first real token
+                state.currentThinkingText = "💭 " + delta;
+              } else {
+                state.currentThinkingText += delta;
+              }
               updateMessages();
             } else if (data.type === "thought") {
               state.currentThinkingText = "";
@@ -597,6 +639,9 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
               notifyCompressionStateChange();
             } else if (data.type === "memory_stats") {
               state.memoryStatsEvent = data.data as MemoryStatsEvent;
+              notifyCompressionStateChange();
+            } else if (data.type === "api_token_usage") {
+              state.apiTokenUsage = data.data as ApiTokenUsageEvent;
               notifyCompressionStateChange();
             } else if (data.type === "error") {
               const errorMessages = state.messages.map((m) =>
@@ -742,9 +787,11 @@ export function useAegisRuntime({ sessionId, onSessionCreated }: UseAegisRuntime
       state.finalImageUrl = null;
       sessionStateRef.current = state;
 
-      // Call streaming chat endpoint
+      // Call streaming chat endpoint (include image config)
+      const ar = encodeURIComponent(getImageAspectRatio());
+      const sz = encodeURIComponent(getImageSize());
       const eventSource = new EventSource(
-        `${API_BASE_URL}/${sid}/chat/stream?message=${encodeURIComponent(textContent)}`
+        `${API_BASE_URL}/${sid}/chat/stream?message=${encodeURIComponent(textContent)}&aspect_ratio=${ar}&image_size=${sz}`
       );
       state.eventSource = eventSource;
 

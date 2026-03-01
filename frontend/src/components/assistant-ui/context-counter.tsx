@@ -19,8 +19,10 @@ import {
   getCompressionStateVersion,
   getCompressionEvent,
   getMemoryStatsEvent,
+  getApiTokenUsage,
   type CompressionEvent,
   type MemoryStatsEvent,
+  type ApiTokenUsageEvent,
 } from "@/hooks/useAegisRuntime";
 
 interface ContextCounterProps {
@@ -42,6 +44,9 @@ const ContextCounter: FC<ContextCounterProps> = ({
     : null;
   const memoryStatsFromSSE: MemoryStatsEvent | null = sessionId
     ? getMemoryStatsEvent(sessionId)
+    : null;
+  const apiTokenUsage: ApiTokenUsageEvent | null = sessionId
+    ? getApiTokenUsage(sessionId)
     : null;
 
   const [stats, setStats] = useState<ContextStatsResponse | null>(null);
@@ -355,6 +360,49 @@ const ContextCounter: FC<ContextCounterProps> = ({
                   <span>/ {formatTokens(stats.max_context_tokens)}</span>
                 </div>
               </div>
+
+              {/* ── API Token Usage Section ────────────── */}
+              {apiTokenUsage && apiTokenUsage.total.total_tokens > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <span className="text-sm">⚡</span>
+                      API Token 用量
+                    </span>
+                    <span className="font-medium text-emerald-500">
+                      {formatTokens(apiTokenUsage.total.total_tokens)}
+                    </span>
+                  </div>
+                  <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/10 p-2 text-xs">
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                      <span className="text-muted-foreground">Prompt</span>
+                      <span className="text-right font-mono">
+                        {formatTokens(apiTokenUsage.total.prompt_tokens)}
+                      </span>
+                      <span className="text-muted-foreground">Completion</span>
+                      <span className="text-right font-mono">
+                        {formatTokens(apiTokenUsage.total.completion_tokens)}
+                      </span>
+                      {apiTokenUsage.planning.total_tokens > 0 && (
+                        <>
+                          <span className="text-muted-foreground">├ 规划</span>
+                          <span className="text-right font-mono">
+                            {formatTokens(apiTokenUsage.planning.total_tokens)}
+                          </span>
+                        </>
+                      )}
+                      {apiTokenUsage.skills.total_tokens > 0 && (
+                        <>
+                          <span className="text-muted-foreground">├ 技能</span>
+                          <span className="text-right font-mono">
+                            {formatTokens(apiTokenUsage.skills.total_tokens)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Stats Grid */}
               <div className="grid grid-cols-3 gap-2">

@@ -22,6 +22,7 @@ class SSEEventType(str, Enum):
     # Planning events
     PLAN_STARTED = "plan_started"
     THINKING = "thinking"
+    THOUGHT_DELTA = "thought_delta"
     THOUGHT = "thought"
     EXECUTING = "executing"
     OBSERVATION = "observation"
@@ -274,6 +275,7 @@ async def stream_plan_execution(
     event_type_mapping = {
         "plan_started": SSEEventType.PLAN_STARTED,
         "thinking": SSEEventType.THINKING,
+        "thought_delta": SSEEventType.THOUGHT_DELTA,
         "thought": SSEEventType.THOUGHT,
         "executing": SSEEventType.EXECUTING,
         "observation": SSEEventType.OBSERVATION,

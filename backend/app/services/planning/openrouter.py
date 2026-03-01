@@ -82,6 +82,12 @@ class OpenRouterPlanningModel(BasePlanningModel):
         self._model = model or settings.openrouter_planning_model
         self._client = OpenRouterClient(api_key=api_key)
         self._history: List[Dict[str, Any]] = []
+        # Accumulated actual API token usage across all calls in this session
+        self._accumulated_usage: Dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         logger.info("OpenRouterPlanningModel created  model=%s", self._model)
 
     # ── BasePlanningModel interface ───────────────────────────────
@@ -101,6 +107,23 @@ class OpenRouterPlanningModel(BasePlanningModel):
 
     def reset(self) -> None:
         self._history.clear()
+        self._accumulated_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @property
+    def token_usage(self) -> Dict[str, int]:
+        """Return accumulated actual API token usage."""
+        return dict(self._accumulated_usage)
+
+    def _accumulate_usage(self, usage: Dict[str, Any]) -> None:
+        """Add a usage dict from an OpenRouter response to the running total."""
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            val = usage.get(key)
+            if val is not None:
+                self._accumulated_usage[key] += int(val)
 
     async def get_next_step(
         self,
@@ -128,6 +151,11 @@ class OpenRouterPlanningModel(BasePlanningModel):
         content = resp["choices"][0]["message"]["content"]
         logger.debug("[Planning] Raw LLM response: %s", content[:500])
 
+        # Track actual token usage from OpenRouter
+        usage = resp.get("usage")
+        if usage:
+            self._accumulate_usage(usage)
+
         # Keep history for multi-turn
         self._history.append({"role": "assistant", "content": content})
 
@@ -143,20 +171,62 @@ class OpenRouterPlanningModel(BasePlanningModel):
         user_message: str,
         observation: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
-        """Stream the next ReAct step.
+        """Stream the next ReAct step using the OpenRouter streaming API.
 
-        Internally calls the non-streaming API and then yields
-        the result token-by-token so the SSE layer can push
-        incremental updates to the frontend.
+        Yields raw content tokens as they arrive so the caller can push
+        ``thought_delta`` SSE events to the frontend.  After the stream
+        finishes, the accumulated text is parsed and a final sentinel
+        line is yielded:
+
+            ``\\x00`` + JSON-encoded ``PlanningStep`` dict
+
+        The caller should detect the ``\\x00`` prefix and extract the
+        parsed step from it.
         """
-        step = await self.get_next_step(user_message, observation)
+        messages = await self._build_messages(user_message, observation)
 
-        yield "thought:"
-        for word in step.thought.split():
-            yield f" {word}"
-        yield "\n"
-        yield f"action: {step.action.value}\n"
-        yield f"action_input: {json.dumps(step.action_input, ensure_ascii=False)}\n"
+        logger.info(
+            "[Planning] get_next_step_stream  model=%s  history_len=%d  has_observation=%s",
+            self._model, len(self._history), observation is not None,
+        )
+
+        accumulated = ""
+        try:
+            async for chunk in self._client.chat_completion_stream(
+                model=self._model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2048,
+            ):
+                # Capture usage from any chunk that includes it
+                chunk_usage = chunk.get("usage")
+                if chunk_usage:
+                    self._accumulate_usage(chunk_usage)
+                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if delta:
+                    accumulated += delta
+                    yield delta
+        except Exception as exc:
+            logger.error("[Planning] OpenRouter stream failed: %s", exc, exc_info=True)
+            raise
+
+        logger.debug("[Planning] Streamed raw response (%d chars): %s", len(accumulated), accumulated[:500])
+
+        # Keep history for multi-turn
+        self._history.append({"role": "assistant", "content": accumulated})
+
+        step = self._parse_step(accumulated)
+        logger.info(
+            "[Planning] Parsed streamed step: action=%s  thought=%.80s…",
+            step.action.value, step.thought,
+        )
+
+        # Yield sentinel so the caller can retrieve the parsed step
+        yield "\x00" + json.dumps({
+            "thought": step.thought,
+            "action": step.action.value,
+            "action_input": step.action_input,
+        }, ensure_ascii=False)
 
     # ── Private helpers ───────────────────────────────────────────
 

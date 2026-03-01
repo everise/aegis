@@ -13,6 +13,7 @@ Responsibilities
 * Structured logging for every outbound request / response
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -24,6 +25,18 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import httpx
 
 from app.config import get_settings
+
+# Transient errors that warrant an automatic retry
+_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE = 1.5  # seconds; actual delay = base * 2^attempt
 
 logger = logging.getLogger("aegis.openrouter")
 
@@ -77,12 +90,15 @@ async def ensure_base64(image_ref: str) -> str:
     """Normalise any image reference to a ``data:`` URI.
 
     Accepts a data-URI, an HTTP(S) URL, or a local file path.
+    URL paths like ``/data/images/...`` are resolved relative to CWD.
     """
     if image_ref.startswith("data:"):
         return image_ref
     if image_ref.startswith(("http://", "https://")):
         return await image_url_to_base64(image_ref)
-    return file_to_base64(image_ref)
+    # Strip leading slash from URL paths so they resolve relative to CWD
+    file_path = image_ref.lstrip("/")
+    return file_to_base64(file_path)
 
 
 # ── Client ────────────────────────────────────────────────────────
@@ -177,15 +193,50 @@ class OpenRouterClient:
         )
         logger.debug("[OpenRouter] Request payload:\n%s", json.dumps(log_payload, ensure_ascii=False, indent=2))
 
-        t0 = time.monotonic()
-        try:
-            resp = await client.post("/chat/completions", json=payload)
-        except httpx.HTTPError as exc:
-            elapsed = time.monotonic() - t0
-            logger.error(
-                "[OpenRouter] Request FAILED after %.2fs: %s", elapsed, exc,
+        if not self.api_key:
+            raise ValueError(
+                "OpenRouter API key is not configured. "
+                "Set 'openrouter.api_key' in aegis.yaml or the "
+                "OPENROUTER_API_KEY environment variable."
             )
-            raise
+
+        t0 = time.monotonic()
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = await client.post("/chat/completions", json=payload)
+                break
+            except _RETRYABLE_EXCEPTIONS as exc:
+                last_exc = exc
+                elapsed = time.monotonic() - t0
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        "[OpenRouter] Transient error on attempt %d/%d after %.2fs "
+                        "(%s: %s) — retrying in %.1fs",
+                        attempt + 1, _MAX_RETRIES, elapsed,
+                        type(exc).__name__, exc, delay,
+                    )
+                    # Dispose the broken connection pool and create a fresh client
+                    try:
+                        await self._client.aclose()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    self._client = None
+                    client = await self._get_client()
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "[OpenRouter] Request FAILED after %d attempts (%.2fs): %s",
+                        _MAX_RETRIES, elapsed, exc,
+                    )
+                    raise
+            except httpx.HTTPError as exc:
+                elapsed = time.monotonic() - t0
+                logger.error(
+                    "[OpenRouter] Request FAILED after %.2fs: %s", elapsed, exc,
+                )
+                raise
         elapsed = time.monotonic() - t0
 
         # ── Log response ──
@@ -231,7 +282,12 @@ class OpenRouterClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Streaming chat completion — yields parsed SSE chunks."""
+        """Streaming chat completion — yields parsed SSE chunks.
+
+        The final chunk before ``[DONE]`` often contains a ``usage``
+        dict.  It is yielded like any other chunk so callers can
+        inspect it (check ``chunk.get("usage")``).
+        """
         client = await self._get_client()
         payload: Dict[str, Any] = {
             "model": model,
@@ -247,31 +303,68 @@ class OpenRouterClient:
         )
 
         t0 = time.monotonic()
-        async with client.stream("POST", "/chat/completions", json=payload) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                logger.error(
-                    "[OpenRouter] Stream error %d:\n%s",
-                    resp.status_code, body.decode("utf-8", errors="replace")[:2000],
-                )
-            resp.raise_for_status()
-            chunk_count = 0
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                try:
-                    chunk_count += 1
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    logger.warning("[OpenRouter] Skipped unparseable SSE chunk: %s", data[:200])
-                    continue
-            elapsed = time.monotonic() - t0
-            logger.info(
-                "[OpenRouter] Stream finished: %d chunks in %.2fs", chunk_count, elapsed,
-            )
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with client.stream("POST", "/chat/completions", json=payload) as resp:
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        logger.error(
+                            "[OpenRouter] Stream error %d:\n%s",
+                            resp.status_code, body.decode("utf-8", errors="replace")[:2000],
+                        )
+                    resp.raise_for_status()
+                    chunk_count = 0
+                    last_usage = None
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[6:]
+                        if data.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk_count += 1
+                            parsed = json.loads(data)
+                            # Capture usage from any chunk that has it
+                            if parsed.get("usage"):
+                                last_usage = parsed["usage"]
+                            yield parsed
+                        except json.JSONDecodeError:
+                            logger.warning("[OpenRouter] Skipped unparseable SSE chunk: %s", data[:200])
+                            continue
+                    elapsed = time.monotonic() - t0
+                    if last_usage:
+                        logger.info(
+                            "[OpenRouter] Stream token usage: prompt=%s  completion=%s  total=%s",
+                            last_usage.get("prompt_tokens"),
+                            last_usage.get("completion_tokens"),
+                            last_usage.get("total_tokens"),
+                        )
+                    logger.info(
+                        "[OpenRouter] Stream finished: %d chunks in %.2fs", chunk_count, elapsed,
+                    )
+                    return  # success — exit retry loop
+            except _RETRYABLE_EXCEPTIONS as exc:
+                elapsed = time.monotonic() - t0
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        "[OpenRouter] Stream transient error on attempt %d/%d "
+                        "after %.2fs (%s) — retrying in %.1fs",
+                        attempt + 1, _MAX_RETRIES, elapsed, exc, delay,
+                    )
+                    try:
+                        await self._client.aclose()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    self._client = None
+                    client = await self._get_client()
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "[OpenRouter] Stream FAILED after %d attempts (%.2fs): %s",
+                        _MAX_RETRIES, elapsed, exc,
+                    )
+                    raise
 
     # ── Lifecycle ─────────────────────────────────────────────────
 

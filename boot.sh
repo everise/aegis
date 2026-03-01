@@ -271,6 +271,30 @@ setup_directories() {
 # 启动服务
 start_server() {
     print_info "Starting Aegis server..."
+
+    # ── 端口可用性预检 ──────────────────────────
+    # WSL2 环境中 Windows winnat 可能静默保留某些端口段 (如 8000-8080),
+    # Linux 工具 (ss/lsof) 看不到，但 bind() 会失败。
+    # 在启动 uvicorn 前先用 Python 快速检测。
+    if ! $PYTHON_CMD -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('$HOST', $PORT))
+    s.close()
+except OSError:
+    print(f'ERROR: Port $PORT is unavailable (likely reserved by Windows/Hyper-V winnat).')
+    print(f'Fix options:')
+    print(f'  1. Change port in aegis.yaml to 3000/5000/9000 etc.')
+    print(f'  2. On Windows PowerShell (Admin): net stop winnat && net start winnat')
+    print(f'  3. Reserve port: netsh int ipv4 add excludedportrange protocol=tcp startport=$PORT numberofports=1')
+    sys.exit(1)
+" 2>/dev/null; then
+        print_error "Port $PORT is not available. See above for fix options."
+        exit 1
+    fi
+
     echo ""
     echo "=========================================="
     echo "  Server: http://${HOST}:${PORT}"

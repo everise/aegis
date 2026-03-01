@@ -15,7 +15,7 @@ import {
   useMessage,
   useThread,
 } from "@assistant-ui/react";
-import { type FC, useRef, useCallback, useContext, useSyncExternalStore } from "react";
+import { type FC, useRef, useCallback, useContext, useSyncExternalStore, useState } from "react";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -49,8 +49,34 @@ import {
 } from "@/components/ui/tooltip";
 import { BranchContext } from "@/pages/ChatPage";
 import { SessionIdContext } from "@/pages/ChatPage";
-import { subscribeToBranchState, getBranchStateVersion } from "@/hooks/useAegisRuntime";
+import { subscribeToBranchState, getBranchStateVersion, setImageAspectRatio, setImageSize } from "@/hooks/useAegisRuntime";
 import ContextCounter from "@/components/assistant-ui/context-counter";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const ASPECT_RATIOS = [
+  { value: "1:1", label: "1:1" },
+  { value: "2:3", label: "2:3" },
+  { value: "3:2", label: "3:2" },
+  { value: "3:4", label: "3:4" },
+  { value: "4:3", label: "4:3" },
+  { value: "4:5", label: "4:5" },
+  { value: "5:4", label: "5:4" },
+  { value: "9:16", label: "9:16" },
+  { value: "16:9", label: "16:9" },
+  { value: "21:9", label: "21:9" },
+];
+
+const IMAGE_SIZES = [
+  { value: "1K", label: "1K" },
+  { value: "2K", label: "2K" },
+  { value: "4K", label: "4K" },
+];
 
 // Suggestion prompts for empty state - 2 shown side by side
 const SUGGESTIONS = [
@@ -479,9 +505,21 @@ const ThreadWelcome: FC = () => {
 const Composer: FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionId = useContext(SessionIdContext);
+  const [aspectRatio, setAspectRatio] = useState("1:1");
+  const [imageSize, setImageSizeLocal] = useState("1K");
 
   const handleAttachClick = () => {
     fileInputRef.current?.click();
+  };
+
+  const handleAspectRatioChange = (value: string) => {
+    setAspectRatio(value);
+    setImageAspectRatio(value);
+  };
+
+  const handleImageSizeChange = (value: string) => {
+    setImageSizeLocal(value);
+    setImageSize(value);
   };
 
   return (
@@ -511,22 +549,62 @@ const Composer: FC = () => {
 
       {/* Bottom toolbar */}
       <div className="flex items-center justify-between px-3 pb-3">
-        {/* Left side - attachment button */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-8 rounded-lg"
-              onClick={handleAttachClick}
-            >
-              <PlusIcon className="size-4" />
-              <span className="sr-only">Attach file</span>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Attach file</TooltipContent>
-        </Tooltip>
+        {/* Left side - attachment button + image config */}
+        <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8 rounded-lg"
+                onClick={handleAttachClick}
+              >
+                <PlusIcon className="size-4" />
+                <span className="sr-only">Attach file</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Attach file</TooltipContent>
+          </Tooltip>
+
+          {/* Aspect Ratio selector */}
+          <Select value={aspectRatio} onValueChange={handleAspectRatioChange}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <SelectTrigger className="h-7 w-[72px] rounded-lg border-none bg-transparent px-2 text-xs text-muted-foreground hover:bg-muted focus:ring-0 focus:ring-offset-0">
+                  <SelectValue />
+                </SelectTrigger>
+              </TooltipTrigger>
+              <TooltipContent>图片比例</TooltipContent>
+            </Tooltip>
+            <SelectContent>
+              {ASPECT_RATIOS.map((ar) => (
+                <SelectItem key={ar.value} value={ar.value} className="text-xs">
+                  {ar.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          {/* Image Size selector */}
+          <Select value={imageSize} onValueChange={handleImageSizeChange}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <SelectTrigger className="h-7 w-[56px] rounded-lg border-none bg-transparent px-2 text-xs text-muted-foreground hover:bg-muted focus:ring-0 focus:ring-offset-0">
+                  <SelectValue />
+                </SelectTrigger>
+              </TooltipTrigger>
+              <TooltipContent>图片尺寸</TooltipContent>
+            </Tooltip>
+            <SelectContent>
+              {IMAGE_SIZES.map((sz) => (
+                <SelectItem key={sz.value} value={sz.value} className="text-xs">
+                  {sz.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
         {/* Right side - context counter + send/stop button */}
         <div className="flex items-center gap-1">

@@ -100,6 +100,7 @@ class OpenRouterImageRepairer:
         message = choice.get("message", {})
         images = message.get("images", [])
         text_content = message.get("content", "")
+        usage = resp.get("usage", {})
 
         if not images:
             logger.warning("[Repair] Model returned no images")
@@ -108,6 +109,7 @@ class OpenRouterImageRepairer:
                 "original_url": image_url,
                 "text": text_content,
                 "error": "No image returned during repair",
+                "usage": usage,
             }
 
         image_data_url: str = images[0].get("image_url", {}).get("url", "")
@@ -120,6 +122,7 @@ class OpenRouterImageRepairer:
             "image_url": saved_path or image_data_url,
             "original_url": image_url,
             "text": text_content,
+            "usage": usage,
         }
 
     # ── Helpers ───────────────────────────────────────────────────
@@ -134,7 +137,8 @@ class OpenRouterImageRepairer:
         filepath = os.path.join(self._output_dir, filename)
         with open(filepath, "wb") as f:
             f.write(base64.b64decode(b64_data))
-        return filepath
+        # Return a URL path (not filesystem path) so the frontend can fetch it
+        return f"/data/images/{filename}"
 
     async def close(self) -> None:
         await self._client.close()

@@ -335,6 +335,8 @@ async def chat(
 async def chat_stream(
     session_id: int,
     message: str = Query(..., min_length=1),
+    aspect_ratio: str = Query("1:1", description="Image aspect ratio (e.g. 1:1, 16:9)"),
+    image_size: str = Query("1K", description="Image size (1K, 2K, 4K)"),
     db: AsyncSession = Depends(get_db_session),
     background_tasks: BackgroundTasks = None,
 ):
@@ -477,8 +479,11 @@ async def chat_stream(
         active_model.reset()
         planner = ReActPlanner(planning_model=active_model, max_steps=10)
         
+        # Pass user-selected image config so text_to_image uses it
+        image_config = {"aspect_ratio": aspect_ratio, "image_size": image_size}
+        
         try:
-            async for event in planner.execute_stream(message, session_id):
+            async for event in planner.execute_stream(message, session_id, image_config=image_config):
                 yield f"data: {json.dumps(event)}\n\n"
                 
                 # Collect events for saving

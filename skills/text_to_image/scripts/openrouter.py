@@ -91,6 +91,7 @@ class OpenRouterImageGenerator:
         message = choice.get("message", {})
         images = message.get("images", [])
         text_content = message.get("content", "")
+        usage = resp.get("usage", {})
 
         if not images:
             logger.warning("[ImageGen] Model returned no images")
@@ -101,6 +102,7 @@ class OpenRouterImageGenerator:
                 "width": None,
                 "height": None,
                 "error": "No image returned by model",
+                "usage": usage,
             }
 
         image_data_url: str = images[0].get("image_url", {}).get("url", "")
@@ -115,6 +117,7 @@ class OpenRouterImageGenerator:
             "text": text_content,
             "width": None,
             "height": None,
+            "usage": usage,
         }
 
     # ── Image-to-image (repair) ───────────────────────────────────
@@ -151,6 +154,8 @@ class OpenRouterImageGenerator:
         images = message.get("images", [])
         text_content = message.get("content", "")
 
+        usage = resp.get("usage", {})
+
         if not images:
             logger.warning("[ImageGen] Repair returned no images")
             return {
@@ -160,6 +165,7 @@ class OpenRouterImageGenerator:
                 "width": None,
                 "height": None,
                 "error": "No image returned during repair",
+                "usage": usage,
             }
 
         image_data_url: str = images[0].get("image_url", {}).get("url", "")
@@ -175,6 +181,7 @@ class OpenRouterImageGenerator:
             "text": text_content,
             "width": None,
             "height": None,
+            "usage": usage,
         }
 
     # ── Helpers ───────────────────────────────────────────────────
@@ -189,7 +196,8 @@ class OpenRouterImageGenerator:
         filepath = os.path.join(self._output_dir, filename)
         with open(filepath, "wb") as f:
             f.write(base64.b64decode(b64_data))
-        return filepath
+        # Return a URL path (not filesystem path) so the frontend can fetch it
+        return f"/data/images/{filename}"
 
     async def close(self) -> None:
         await self._client.close()
