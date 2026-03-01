@@ -55,7 +55,7 @@ retrieval:
 
 
 openrouter:
-  api_key: "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"
+  api_key: "your api key"
   planning_model: "google/gemini-2.5-pro-preview"          # ReAct 规划使用的模型
   image_gen_model: "google/gemini-2.5-flash-image-preview"  # 图片生成使用的模型
   vl_model: "google/gemini-2.5-pro-preview"                 # VL 评分使用的视觉模型

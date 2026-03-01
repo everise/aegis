@@ -10,6 +10,7 @@ from app.services.planning.registry import PlanningModelRegistry, get_planning_r
 from app.services.planning.gemini import GeminiPlanningModel
 from app.services.planning.kimi import KimiPlanningModel
 from app.services.planning.qwen_vl import QwenVLPlanningModel
+from app.services.planning.openrouter import OpenRouterPlanningModel
 
 __all__ = [
     "BasePlanningModel",
@@ -20,4 +21,5 @@ __all__ = [
     "GeminiPlanningModel",
     "KimiPlanningModel",
     "QwenVLPlanningModel",
+    "OpenRouterPlanningModel",
 ]

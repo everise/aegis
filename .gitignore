@@ -115,3 +115,4 @@ coverage/
 *.crt
 .credentials/
 secrets/
+aegis.yaml

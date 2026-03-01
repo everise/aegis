@@ -85,11 +85,13 @@ def get_planning_registry() -> PlanningModelRegistry:
         from app.services.planning.gemini import GeminiPlanningModel
         from app.services.planning.kimi import KimiPlanningModel
         from app.services.planning.qwen_vl import QwenVLPlanningModel
+        from app.services.planning.openrouter import OpenRouterPlanningModel
 
         _registry = PlanningModelRegistry()
         _registry.register(GeminiPlanningModel())
         _registry.register(KimiPlanningModel())
         _registry.register(QwenVLPlanningModel())
+        _registry.register(OpenRouterPlanningModel())
 
     return _registry
 

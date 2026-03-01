@@ -5,7 +5,9 @@ Provides the main application factory and startup/shutdown events.
 Serves both API and frontend static files from the same port.
 """
 
+import logging
 import os
+import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -17,6 +19,41 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db, close_db
+
+
+# ── Logging setup ─────────────────────────────────────────────────
+def _configure_logging() -> None:
+    """Set up structured logging for the Aegis application."""
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console handler — INFO by default, DEBUG if server.debug is true
+    console = logging.StreamHandler(sys.stdout)
+    settings = get_settings()
+    console.setLevel(logging.DEBUG if settings.debug else logging.INFO)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    # File handler — always DEBUG so we can diagnose after the fact
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    file_handler = logging.FileHandler(log_dir / "aegis.log", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    # Quieten noisy third-party loggers
+    for noisy in ("httpcore", "httpx", "chromadb", "uvicorn.access", "onnxruntime"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_configure_logging()
+logger = logging.getLogger("aegis")
 
 # Frontend build directory (relative to project root)
 FRONTEND_DIST_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
@@ -31,9 +68,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     and cleanup.
     """
     # Startup
+    logger.info("Aegis starting up …")
     await init_db()
+    logger.info("Database initialised")
     yield
     # Shutdown
+    logger.info("Aegis shutting down …")
     await close_db()
 
 

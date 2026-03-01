@@ -84,6 +84,10 @@ def _flatten(data: Dict[str, Any]) -> Dict[str, Any]:
         ("retrieval", "rrf_k"): "retrieval_rrf_k",
         ("retrieval", "top_k"): "retrieval_top_k",
         ("retrieval", "enabled"): "retrieval_enabled",
+        ("openrouter", "api_key"): "openrouter_api_key",
+        ("openrouter", "planning_model"): "openrouter_planning_model",
+        ("openrouter", "image_gen_model"): "openrouter_image_gen_model",
+        ("openrouter", "vl_model"): "openrouter_vl_model",
     }
 
     for (section, key), field_name in mapping.items():
@@ -178,6 +182,24 @@ class Settings(BaseModel):
     retrieval_enabled: bool = Field(
         default=True,
         description="Enable dual-level retrieval augmentation in the ReAct planner",
+    )
+
+    # OpenRouter
+    openrouter_api_key: str = Field(
+        default="",
+        description="OpenRouter API key",
+    )
+    openrouter_planning_model: str = Field(
+        default="google/gemini-2.5-pro-preview",
+        description="Model ID used by the OpenRouter planning implementation",
+    )
+    openrouter_image_gen_model: str = Field(
+        default="google/gemini-2.5-flash-image-preview",
+        description="Model ID used by the OpenRouter image generation implementation",
+    )
+    openrouter_vl_model: str = Field(
+        default="google/gemini-2.5-pro-preview",
+        description="Model ID used by the OpenRouter VL scoring implementation",
     )
 
     # ── validators ───────────────────────────────────────────────
