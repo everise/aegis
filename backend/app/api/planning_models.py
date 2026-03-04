@@ -10,7 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services.planning.registry import get_planning_registry
+from app.providers.registry import get_provider_registry
 
 
 router = APIRouter()
@@ -50,8 +50,8 @@ class SetActiveModelResponse(BaseModel):
 @router.get("", response_model=PlanningModelListResponse)
 async def list_planning_models() -> PlanningModelListResponse:
     """List all available planning models and the currently active one."""
-    registry = get_planning_registry()
-    models = registry.list_models()
+    registry = get_provider_registry()
+    providers = registry.list_providers()
     return PlanningModelListResponse(
         models=[
             PlanningModelResponse(
@@ -62,18 +62,18 @@ async def list_planning_models() -> PlanningModelListResponse:
                 supports_vision=m.supports_vision,
                 supports_streaming=m.supports_streaming,
             )
-            for m in models
+            for m in providers
         ],
-        active_model_id=registry.get_active_model_id(),
+        active_model_id=registry.get_active_provider_id(),
     )
 
 
 @router.get("/active", response_model=PlanningModelResponse)
 async def get_active_planning_model() -> PlanningModelResponse:
     """Get the currently active planning model."""
-    registry = get_planning_registry()
-    model = registry.get_active_model()
-    info = model.info()
+    registry = get_provider_registry()
+    provider = registry.get_active_provider()
+    info = provider.info()
     return PlanningModelResponse(
         id=info.id,
         name=info.name,
@@ -89,16 +89,16 @@ async def set_active_planning_model(
     request: SetActiveModelRequest,
 ) -> SetActiveModelResponse:
     """Switch the active planning model."""
-    registry = get_planning_registry()
+    registry = get_provider_registry()
     try:
-        model = registry.set_active_model(request.model_id)
+        provider = registry.set_active_provider(request.model_id)
     except KeyError:
-        available = [m.id for m in registry.list_models()]
+        available = [m.id for m in registry.list_providers()]
         raise HTTPException(
             status_code=404,
             detail=f"Unknown model '{request.model_id}'. Available: {available}",
         )
-    info = model.info()
+    info = provider.info()
     return SetActiveModelResponse(
         active_model_id=info.id,
         model=PlanningModelResponse(

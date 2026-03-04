@@ -24,7 +24,7 @@ from app.database import (
     get_db_session_context,
 )
 from app.services.react_planner import ReActPlanner
-from app.services.planning.registry import get_planning_registry
+from app.providers.registry import get_provider_registry
 from app.services.sse_manager import (
     SSEConnection,
     get_sse_manager,
@@ -279,11 +279,11 @@ async def chat(
     except Exception as e:
         print(f"Warning: Failed to store message in working memory: {e}")
     
-    # Execute ReAct planning — use the active planning model
-    registry = get_planning_registry()
-    active_model = registry.get_active_model()
-    active_model.reset()
-    planner = ReActPlanner(planning_model=active_model, max_steps=10)
+    # Execute ReAct planning — use the active provider
+    registry = get_provider_registry()
+    active_provider = registry.get_active_provider()
+    active_provider.reset()
+    planner = ReActPlanner(provider=active_provider, max_steps=10)
     plan = await planner.execute(request.content, session_id=session_id)
     await planner.close()
     
@@ -473,11 +473,11 @@ async def chat_stream(
         except Exception:
             pass
         
-        # Execute planning with streaming — use active planning model
-        registry = get_planning_registry()
-        active_model = registry.get_active_model()
-        active_model.reset()
-        planner = ReActPlanner(planning_model=active_model, max_steps=10)
+        # Execute planning with streaming — use active provider
+        registry = get_provider_registry()
+        active_provider = registry.get_active_provider()
+        active_provider.reset()
+        planner = ReActPlanner(provider=active_provider, max_steps=10)
         
         # Pass user-selected image config so text_to_image uses it
         image_config = {"aspect_ratio": aspect_ratio, "image_size": image_size}

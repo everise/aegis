@@ -128,7 +128,7 @@ def register_routes(app: FastAPI) -> None:
     from app.api import planning_models
     from app.api import prompts
     from app.api import context
-    from app.services.mock_remote import router as mock_router
+    from app.providers.mock_remote import router as mock_router
     
     # Health check endpoint
     @app.get("/health")

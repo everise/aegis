@@ -48,7 +48,7 @@ export default function ChatPage() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [selectedModel, setSelectedModel] = useState("gemini");
+  const [selectedModel, setSelectedModel] = useState("openrouter");
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());

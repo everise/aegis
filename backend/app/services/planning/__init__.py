@@ -1,25 +1,11 @@
 """
-Planning model abstraction layer.
+Planning model implementations.
 
-Provides a pluggable interface for different planning models (LLMs)
-that drive the ReAct planning loop.
+Contains concrete planning model classes (Kimi, Gemini, Qwen-VL)
+built on the ``BasePlanningModel`` base class defined in ``base.py``.
+
+.. note::
+    The canonical provider interface lives in ``app.providers``.
+    These legacy planning models extend ``BasePlanningModel`` which
+    wraps the provider interface with additional helper methods.
 """
-
-from app.services.planning.base import BasePlanningModel, PlanningModelInfo, PlanningStep
-from app.services.planning.registry import PlanningModelRegistry, get_planning_registry
-from app.services.planning.gemini import GeminiPlanningModel
-from app.services.planning.kimi import KimiPlanningModel
-from app.services.planning.qwen_vl import QwenVLPlanningModel
-from app.services.planning.openrouter import OpenRouterPlanningModel
-
-__all__ = [
-    "BasePlanningModel",
-    "PlanningModelInfo",
-    "PlanningStep",
-    "PlanningModelRegistry",
-    "get_planning_registry",
-    "GeminiPlanningModel",
-    "KimiPlanningModel",
-    "QwenVLPlanningModel",
-    "OpenRouterPlanningModel",
-]

@@ -5,16 +5,12 @@ Tests planning models, ReAct planner, and SSE manager.
 """
 
 import pytest
-import pytest_asyncio
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.planning.base import BasePlanningModel, PlanningStep, ActionType, PlanningModelInfo
-from app.services.planning.gemini import GeminiPlanningModel
-from app.services.planning.kimi import KimiPlanningModel
-from app.services.planning.qwen_vl import QwenVLPlanningModel
-from app.services.planning.registry import PlanningModelRegistry, get_planning_registry, reset_planning_registry
+from app.providers.base import BaseProvider, PlanningStep, ActionType, ProviderInfo
+from app.providers.mock import MockProvider
+from app.providers.registry import ProviderRegistry, get_provider_registry, reset_provider_registry
 from app.services.react_planner import (
     ReActPlanner,
     ExecutionPlan,
@@ -30,183 +26,153 @@ from app.services.sse_manager import (
     reset_sse_manager,
     stream_plan_execution,
 )
-from app.services.skill_executor import SkillResult, SkillStatus
+
+# Backward-compat aliases used in some tests
+PlanningModelInfo = ProviderInfo
+MockPlanningModel = MockProvider
 
 
 class TestPlanningModelInterface:
     """Tests for the planning model abstract interface and implementations."""
 
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    def test_model_info(self, ModelClass):
-        """Each model returns valid info."""
-        model = ModelClass()
-        info = model.info()
-        assert isinstance(info, PlanningModelInfo)
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    def test_model_info(self, ProviderClass):
+        """Each provider returns valid info."""
+        provider = ProviderClass()
+        info = provider.info()
+        assert isinstance(info, ProviderInfo)
         assert info.id
         assert info.name
         assert info.provider
 
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    def test_reset(self, ModelClass):
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    def test_reset(self, ProviderClass):
         """Reset clears internal state."""
-        model = ModelClass()
-        model._step = 5
-        model._repairs = 2
-        model.reset()
-        assert model._step == 0
-        assert model._repairs == 0
+        provider = ProviderClass()
+        provider._step = 5
+        provider._repairs = 2
+        provider.reset()
+        assert provider._step == 0
+        assert provider._repairs == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    async def test_first_step_generates(self, ModelClass):
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    async def test_first_step_generates(self, ProviderClass):
         """First step should always be a generate action."""
-        model = ModelClass()
-        step = await model.get_next_step("Create a sunset image")
+        provider = ProviderClass()
+        step = await provider.get_next_step("Create a sunset image")
         assert step.action == ActionType.GENERATE
         assert "text_to_image" in str(step.action_input)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    async def test_second_step_evaluates(self, ModelClass):
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    async def test_second_step_evaluates(self, ProviderClass):
         """Second step should evaluate the generated image."""
-        model = ModelClass()
-        await model.get_next_step("Create an image")
+        provider = ProviderClass()
+        await provider.get_next_step("Create an image")
         observation = {
             "result": {"image_url": "http://example.com/img.png"},
             "status": "completed",
         }
-        step = await model.get_next_step("Create an image", observation)
+        step = await provider.get_next_step("Create an image", observation)
         assert step.action == ActionType.EVALUATE
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    async def test_high_quality_finishes(self, ModelClass):
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    async def test_high_quality_finishes(self, ProviderClass):
         """High quality score should lead to a finish action."""
-        model = ModelClass()
-        model.quality_threshold = 0.7
-        await model.get_next_step("Create an image")
-        await model.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
-        step = await model.get_next_step("Create an image", {"result": {"overall_score": 0.9}})
+        provider = ProviderClass()
+        provider.quality_threshold = 0.7
+        await provider.get_next_step("Create an image")
+        await provider.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
+        step = await provider.get_next_step("Create an image", {"result": {"overall_score": 0.9}})
         assert step.action == ActionType.FINISH
         assert step.action_input.get("result") == "success"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    async def test_low_quality_triggers_repair(self, ModelClass):
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    async def test_low_quality_triggers_repair(self, ProviderClass):
         """Low quality score should trigger repair."""
-        model = ModelClass()
-        model.quality_threshold = 0.7
-        await model.get_next_step("Create an image")
-        await model.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
-        step = await model.get_next_step("Create an image", {"result": {"overall_score": 0.5}})
+        provider = ProviderClass()
+        provider.quality_threshold = 0.7
+        await provider.get_next_step("Create an image")
+        await provider.get_next_step("Create an image", {"result": {"image_url": "http://example.com/img.png"}})
+        step = await provider.get_next_step("Create an image", {"result": {"overall_score": 0.5}})
         assert step.action == ActionType.REPAIR
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ModelClass", [GeminiPlanningModel, KimiPlanningModel, QwenVLPlanningModel])
-    async def test_chat_completion_wrapper(self, ModelClass):
-        """chat_completion returns valid OpenAI-like response."""
-        model = ModelClass()
-        response = await model.chat_completion([
-            {"role": "user", "content": "Generate an image of a cat"}
-        ])
-        assert "choices" in response
-        content = json.loads(response["choices"][0]["message"]["content"])
-        assert "thought" in content
-        assert "action" in content
+    @pytest.mark.parametrize("ProviderClass", [MockProvider])
+    async def test_first_step_produces_valid_step(self, ProviderClass):
+        """Provider returns a valid PlanningStep on first call."""
+        provider = ProviderClass()
+        step = await provider.get_next_step("Generate an image of a cat")
+        assert isinstance(step, PlanningStep)
+        assert step.thought
+        assert step.action in ActionType
 
     def test_format_step_as_dict(self):
         """PlanningStep to dict conversion."""
-        model = GeminiPlanningModel()
+        provider = MockProvider()
         step = PlanningStep(
             thought="Test thought",
             action=ActionType.GENERATE,
             action_input={"skill": "text_to_image"},
         )
-        result = model.format_step_as_dict(step)
+        result = provider.format_step_as_dict(step)
         assert result["thought"] == "Test thought"
         assert result["action"] == "generate"
 
 
 class TestPlanningModelRegistry:
-    """Tests for planning model registry."""
+    """Tests for provider registry."""
 
     def test_register_and_list(self):
-        """Registered models appear in list."""
-        reg = PlanningModelRegistry()
-        reg.register(GeminiPlanningModel())
-        reg.register(KimiPlanningModel())
-        assert len(reg.list_models()) == 2
+        """Registered providers appear in list."""
+        reg = ProviderRegistry()
+        reg.register(MockProvider())
+        assert len(reg.list_providers()) == 1
 
     def test_first_registered_is_default(self):
-        """First registered model becomes the default active model."""
-        reg = PlanningModelRegistry()
-        reg.register(GeminiPlanningModel())
-        reg.register(KimiPlanningModel())
-        assert reg.get_active_model_id() == "gemini"
+        """First registered provider becomes the default active one."""
+        reg = ProviderRegistry()
+        from app.providers.openrouter import OpenRouterProvider
+        reg.register(OpenRouterProvider())
+        reg.register(MockProvider())
+        assert reg.get_active_provider_id() == "openrouter"
 
     def test_set_active_model(self):
-        """set_active_model switches the active model."""
-        reg = PlanningModelRegistry()
-        reg.register(GeminiPlanningModel())
-        reg.register(KimiPlanningModel())
-        reg.set_active_model("kimi")
-        assert reg.get_active_model_id() == "kimi"
+        """set_active_provider switches the active provider."""
+        reg = ProviderRegistry()
+        from app.providers.openrouter import OpenRouterProvider
+        reg.register(OpenRouterProvider())
+        reg.register(MockProvider())
+        reg.set_active_provider("mock")
+        assert reg.get_active_provider_id() == "mock"
 
     def test_set_unknown_model_raises(self):
-        """Setting an unknown model id raises KeyError."""
-        reg = PlanningModelRegistry()
-        reg.register(GeminiPlanningModel())
+        """Setting an unknown provider id raises KeyError."""
+        reg = ProviderRegistry()
+        reg.register(MockProvider())
         with pytest.raises(KeyError):
-            reg.set_active_model("nonexistent")
+            reg.set_active_provider("nonexistent")
 
     def test_global_registry(self):
-        """get_planning_registry returns a populated singleton."""
-        reset_planning_registry()
-        reg = get_planning_registry()
-        ids = [m.id for m in reg.list_models()]
-        assert "gemini" in ids
-        assert "kimi" in ids
-        assert "qwen-vl" in ids
+        """get_provider_registry returns a populated singleton."""
+        reset_provider_registry()
+        reg = get_provider_registry()
+        ids = [m.id for m in reg.list_providers()]
+        assert "openrouter" in ids
+        assert "mock" in ids
 
 
 class TestReActPlanner:
     """Tests for ReActPlanner."""
     
-    @pytest_asyncio.fixture
-    async def mock_skill_executor(self):
-        """Create mock skill executor."""
-        executor = AsyncMock()
-        executor.execute.return_value = SkillResult(
-            skill_name="text_to_image",
-            status=SkillStatus.COMPLETED,
-            result={"image_url": "http://example.com/img.png"},
-        )
-        return executor
-    
     @pytest.mark.asyncio
-    async def test_execute_basic_flow(self, mock_skill_executor):
-        """Test basic execution flow."""
-        # Configure mock to return high quality on evaluation
-        def mock_execute(skill_name, params):
-            if skill_name == "text_to_image":
-                return SkillResult(
-                    skill_name=skill_name,
-                    status=SkillStatus.COMPLETED,
-                    result={"image_url": "http://example.com/img.png"},
-                )
-            elif skill_name == "evaluate_image":
-                return SkillResult(
-                    skill_name=skill_name,
-                    status=SkillStatus.COMPLETED,
-                    result={"overall_score": 0.9, "scores": {}},
-                )
-            return SkillResult(skill_name=skill_name, status=SkillStatus.COMPLETED, result={})
-        
-        mock_skill_executor.execute.side_effect = mock_execute
-        
+    async def test_execute_basic_flow(self):
+        """Test basic execution flow with MockProvider."""
         planner = ReActPlanner(
-            skill_executor=mock_skill_executor,
-            planning_model=GeminiPlanningModel(),
+            provider=MockProvider(),
             max_steps=10,
         )
         
@@ -217,18 +183,10 @@ class TestReActPlanner:
         assert plan.final_result is not None
     
     @pytest.mark.asyncio
-    async def test_execute_respects_max_steps(self, mock_skill_executor):
+    async def test_execute_respects_max_steps(self):
         """Test that execution stops at max steps."""
-        # Make evaluation always return low score to force repairs
-        mock_skill_executor.execute.return_value = SkillResult(
-            skill_name="evaluate_image",
-            status=SkillStatus.COMPLETED,
-            result={"overall_score": 0.3},
-        )
-        
         planner = ReActPlanner(
-            skill_executor=mock_skill_executor,
-            planning_model=GeminiPlanningModel(),
+            provider=MockProvider(),
             max_steps=3,
         )
         
@@ -237,17 +195,24 @@ class TestReActPlanner:
         assert len(plan.steps) <= 3
     
     @pytest.mark.asyncio
-    async def test_execute_handles_skill_failure(self, mock_skill_executor):
+    async def test_execute_handles_skill_failure(self):
         """Test handling of skill execution failure."""
-        mock_skill_executor.execute.return_value = SkillResult(
-            skill_name="text_to_image",
-            status=SkillStatus.FAILED,
-            error="API error",
-        )
-        
+        # Create a mock provider where execute_skill always fails
+        provider = MockProvider()
+        original_execute = provider.execute_skill
+
+        async def failing_execute(skill_name, params):
+            return {
+                "skill_name": skill_name,
+                "status": "failed",
+                "result": None,
+                "error": "API error",
+            }
+
+        provider.execute_skill = failing_execute  # type: ignore[assignment]
+
         planner = ReActPlanner(
-            skill_executor=mock_skill_executor,
-            planning_model=GeminiPlanningModel(),
+            provider=provider,
             max_steps=5,
         )
         
@@ -257,17 +222,10 @@ class TestReActPlanner:
         assert any(s.observation and s.observation.get("error") for s in plan.steps)
     
     @pytest.mark.asyncio
-    async def test_execute_stream_yields_events(self, mock_skill_executor):
+    async def test_execute_stream_yields_events(self):
         """Test streaming execution yields events."""
-        mock_skill_executor.execute.return_value = SkillResult(
-            skill_name="text_to_image",
-            status=SkillStatus.COMPLETED,
-            result={"image_url": "http://example.com/img.png", "overall_score": 0.9},
-        )
-        
         planner = ReActPlanner(
-            skill_executor=mock_skill_executor,
-            planning_model=GeminiPlanningModel(),
+            provider=MockProvider(),
             max_steps=5,
         )
         
@@ -280,17 +238,10 @@ class TestReActPlanner:
         assert "plan_started" in event_types
     
     @pytest.mark.asyncio
-    async def test_plan_to_dict(self, mock_skill_executor):
+    async def test_plan_to_dict(self):
         """Test plan serialization to dict."""
-        mock_skill_executor.execute.return_value = SkillResult(
-            skill_name="text_to_image",
-            status=SkillStatus.COMPLETED,
-            result={"image_url": "http://example.com/img.png", "overall_score": 0.9},
-        )
-        
         planner = ReActPlanner(
-            skill_executor=mock_skill_executor,
-            planning_model=GeminiPlanningModel(),
+            provider=MockProvider(),
             max_steps=5,
         )
         
